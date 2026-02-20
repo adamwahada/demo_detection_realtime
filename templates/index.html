@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Parallel Tracking Server</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', Arial, sans-serif; background: #0d1117; color: #e6edf3; }
+
+        .header {
+            background: linear-gradient(135deg, #161b22, #1a2332);
+            padding: 16px 24px;
+            border-bottom: 1px solid #30363d;
+            display: flex; align-items: center; gap: 16px;
+        }
+        .header h1 { font-size: 1.3em; color: #58a6ff; }
+        .mode-badge {
+            background: #238636; color: #fff; font-size: 0.75em;
+            padding: 3px 10px; border-radius: 12px; font-weight: 600;
+        }
+
+        .main { display: flex; gap: 16px; padding: 16px; height: calc(100vh - 70px); }
+
+        /* Left: Video + controls */
+        .left { flex: 2; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+        .controls {
+            display: flex; gap: 8px; align-items: center;
+            background: #161b22; padding: 10px 14px; border-radius: 8px;
+            border: 1px solid #30363d;
+        }
+        .controls input {
+            flex: 1; padding: 8px 12px; font-size: 13px;
+            background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+            color: #e6edf3; outline: none;
+        }
+        .controls input:focus { border-color: #58a6ff; }
+        .controls button {
+            padding: 8px 18px; border: none; border-radius: 6px;
+            font-weight: 600; font-size: 13px; cursor: pointer;
+        }
+        .btn-start { background: #238636; color: #fff; }
+        .btn-start:hover { background: #2ea043; }
+        .btn-stop { background: #da3633; color: #fff; }
+        .btn-stop:hover { background: #f85149; }
+
+        .stream-container {
+            flex: 1; background: #010409; border-radius: 8px; overflow: hidden;
+            border: 1px solid #30363d; position: relative; min-height: 0;
+        }
+        .stream-container img {
+            width: 100%; height: 100%; object-fit: contain;
+        }
+        .stream-overlay {
+            position: absolute; top: 8px; right: 8px;
+            display: flex; gap: 6px;
+        }
+        .stream-badge {
+            font-size: 0.7em; padding: 2px 8px; border-radius: 4px;
+            font-weight: 600; background: rgba(0,0,0,0.7);
+        }
+        .badge-video { color: #3fb950; border: 1px solid #238636; }
+        .badge-yolo  { color: #d29922; border: 1px solid #9e6a03; }
+
+        .legend {
+            display: flex; gap: 16px; font-size: 0.8em; padding: 6px 0;
+            color: #8b949e;
+        }
+        .leg-item { display: flex; align-items: center; gap: 5px; }
+        .leg-dot { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+
+        /* Right: Stats panel */
+        .right {
+            flex: 0 0 300px; display: flex; flex-direction: column; gap: 12px;
+        }
+
+        .panel {
+            background: #161b22; border: 1px solid #30363d;
+            border-radius: 8px; padding: 14px;
+        }
+        .panel h3 {
+            font-size: 0.85em; color: #8b949e; text-transform: uppercase;
+            letter-spacing: 0.5px; margin-bottom: 10px;
+        }
+
+        .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .stat-card {
+            background: #0d1117; border-radius: 6px; padding: 10px;
+            text-align: center; border: 1px solid #21262d;
+        }
+        .stat-value { font-size: 1.6em; font-weight: 700; }
+        .stat-label { font-size: 0.72em; color: #8b949e; margin-top: 2px; }
+        .c-total { color: #58a6ff; }
+        .c-ok    { color: #3fb950; }
+        .c-nok   { color: #f85149; }
+        .c-def   { color: #d29922; }
+        .c-vfps  { color: #bc8cff; }
+        .c-dfps  { color: #f0883e; }
+        .c-ms    { color: #8b949e; }
+
+        .fifo-box {
+            background: #0d1117; border-radius: 6px; padding: 10px;
+            font-family: 'JetBrains Mono', monospace; font-size: 0.8em;
+            min-height: 60px; border: 1px solid #21262d;
+            max-height: 200px; overflow-y: auto;
+        }
+        .fifo-item {
+            display: inline-block; margin: 2px 3px; padding: 2px 7px;
+            border-radius: 4px; font-weight: 600; font-size: 0.85em;
+        }
+        .fifo-ok  { background: #0d2818; color: #3fb950; }
+        .fifo-nok { background: #3d1114; color: #f85149; }
+        .fifo-def { background: #3d2004; color: #d29922; }
+
+        .status-bar {
+            display: flex; align-items: center; gap: 8px;
+            font-size: 0.8em; color: #8b949e;
+        }
+        .status-dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: #484f58;
+        }
+        .status-dot.running { background: #3fb950; animation: pulse 1.5s infinite; }
+        .status-dot.ended   { background: #d29922; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+    </style>
+    <script>
+        function startTracking() {
+            const src = document.getElementById('videoSource').value;
+            fetch('/api/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source: src })
+            })
+            .then(r => r.json())
+            .then(d => { console.log(d); })
+            .catch(e => alert('Error: ' + e));
+        }
+
+        function stopTracking() {
+            fetch('/api/stop', { method: 'POST' })
+            .then(r => r.json())
+            .then(d => console.log(d));
+        }
+
+        function updateStats() {
+            fetch('/api/stats')
+            .then(r => r.json())
+            .then(d => {
+                document.getElementById('total').textContent = d.total_packets;
+                document.getElementById('ok').textContent    = d.packages_ok;
+                document.getElementById('nok').textContent   = d.packages_nok;
+                document.getElementById('def').textContent   = d.packages_defective;
+                document.getElementById('vfps').textContent  = d.video_fps || 0;
+                document.getElementById('dfps').textContent  = d.det_fps   || 0;
+                document.getElementById('ms').textContent    = d.inference_ms || 0;
+
+                // Stream badges
+                document.getElementById('badge-vfps').textContent = 'Video: ' + (d.video_fps||0) + ' fps';
+                document.getElementById('badge-dfps').textContent = 'YOLO: ' + (d.det_fps||0) + ' fps';
+
+                // Status
+                const dot = document.getElementById('statusDot');
+                const txt = document.getElementById('statusText');
+                if (d.video_ended) {
+                    dot.className = 'status-dot ended';
+                    txt.textContent = 'Video ended';
+                } else if (d.is_running) {
+                    dot.className = 'status-dot running';
+                    txt.textContent = 'Processing...';
+                } else {
+                    dot.className = 'status-dot';
+                    txt.textContent = 'Idle';
+                }
+
+                // FIFO
+                const box = document.getElementById('fifo');
+                box.innerHTML = '';
+                if (d.fifo_queue && d.fifo_queue.length > 0) {
+                    const total = d.total_packets;
+                    const start = Math.max(1, total - d.fifo_queue.length + 1);
+                    d.fifo_queue.forEach((dec, i) => {
+                        const s = document.createElement('span');
+                        s.className = 'fifo-item fifo-' + dec.toLowerCase();
+                        s.textContent = '#' + (start + i) + ':' + dec;
+                        box.appendChild(s);
+                    });
+                } else {
+                    box.textContent = '(empty)';
+                }
+            });
+        }
+
+        setInterval(updateStats, 400);
+    </script>
+</head>
+<body>
+    <div class="header">
+        <h1>Real-Time Tracking + Barcode Detection</h1>
+        <span class="mode-badge">PARALLEL MODE</span>
+        <div class="status-bar" style="margin-left:auto;">
+            <div class="status-dot" id="statusDot"></div>
+            <span id="statusText">Idle</span>
+        </div>
+    </div>
+
+    <div class="main">
+        <!-- Left: Video -->
+        <div class="left">
+            <div class="controls">
+                <input type="text" id="videoSource" value="/dev/video0"
+                    placeholder="/dev/video0 | /path/to/video.mp4 | rtsp://..."
+                    onkeydown="if(event.key==='Enter') startTracking()">
+                <button class="btn-start" onclick="startTracking()">&#9654; Start</button>
+                <button class="btn-stop"  onclick="stopTracking()">&#9632; Stop</button>
+            </div>
+
+            <div class="stream-container">
+                <img src="/video_feed" alt="Video Stream">
+                <div class="stream-overlay">
+                    <span class="stream-badge badge-video" id="badge-vfps">Video: 0 fps</span>
+                    <span class="stream-badge badge-yolo"  id="badge-dfps">YOLO: 0 fps</span>
+                </div>
+            </div>
+
+            <div class="legend">
+                <div class="leg-item"><span class="leg-dot" style="background:#3fb950"></span> OK (barcode)</div>
+                <div class="leg-item"><span class="leg-dot" style="background:#f85149"></span> NOK (no barcode)</div>
+                <div class="leg-item"><span class="leg-dot" style="background:#d29922"></span> DEFECTIVE (fallen)</div>
+                <div class="leg-item"><span class="leg-dot" style="background:#58a6ff"></span> Decision locked</div>
+            </div>
+        </div>
+
+        <!-- Right: Stats -->
+        <div class="right">
+            <div class="panel">
+                <h3>Packet Stats</h3>
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value c-total" id="total">0</div>
+                        <div class="stat-label">Total Packets</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value c-ok" id="ok">0</div>
+                        <div class="stat-label">OK &#10003;</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value c-nok" id="nok">0</div>
+                        <div class="stat-label">NOK &#10007;</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value c-def" id="def">0</div>
+                        <div class="stat-label">DEFECTIVE &#9888;</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h3>Performance</h3>
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value c-vfps" id="vfps">0</div>
+                        <div class="stat-label">Video FPS</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value c-dfps" id="dfps">0</div>
+                        <div class="stat-label">YOLO FPS</div>
+                    </div>
+                    <div class="stat-card" style="grid-column: span 2;">
+                        <div class="stat-value c-ms" id="ms">0</div>
+                        <div class="stat-label">Inference (ms)</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel" style="flex:1; display:flex; flex-direction:column;">
+                <h3>FIFO Queue (last 10)</h3>
+                <div class="fifo-box" id="fifo" style="flex:1;">(empty)</div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,45 @@
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ── Virtual environments ──
+venv/
+env/
+test_env/
+.venv/
+
+# ── YOLO model weights (too large for git) ──
+*.pt
+*.onnx
+*.engine
+
+# ── Video files ──
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
+*.flv
+*.webm
+
+# ── Live images captured at runtime ──
+liveImages/
+
+# ── IDE / Editor ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS files ──
+.DS_Store
+Thumbs.db
+
+# ── Logs / temp ──
+*.log
+*.tmp
+core
+core.*
