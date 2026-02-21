@@ -37,6 +37,14 @@ class TrackingState:
         self.package_id = None
         self.barcode_id = None
 
+        # Active checkpoint info (set by switch_checkpoint / init_models)
+        self.mode = "tracking"          # "tracking" or "date"
+        self.current_checkpoint = None  # the checkpoint dict from CHECKPOINTS
+
+        # Session generation counter — prevents old reader threads from
+        # clobbering is_running after a camera/checkpoint switch
+        self._session_gen = 0
+
         self.video_source = None
         self.cap = None
         self.is_running = False
@@ -65,6 +73,11 @@ class TrackingState:
         # ── Frame dimensions (set by reader, used by compositor for exit line) ──
         self._frame_width = 0
         self._frame_height = 0
+
+        # ── Exit line Y position (set once by detector from first frame, never via overlay) ──
+        self._exit_line_y = 0
+        # ── Exit line enabled flag (can be toggled via API, survives sessions) ──
+        self._exit_line_enabled = True
 
         # ── Per-session tracking state ──
         self.frame_count = 0
@@ -123,6 +136,9 @@ class TrackingState:
         self._det_frame_idx = 0
         self._det_event.clear()
         self._raw_changed.clear()
+        # Reset exit line so a different-resolution camera gets a fresh value;
+        # the compositor fallback (from raw frame height) fills in immediately
+        self._exit_line_y = 0
         with self._jpeg_lock:
             self._jpeg_bytes = None
         with self._overlay_lock:
@@ -153,11 +169,13 @@ class TrackingState:
             frame_rate=30
         )
 
+        self._session_gen += 1          # bump before launching so threads capture the right id
+        my_gen = self._session_gen
         self.is_running = True
 
-        # Launch THREE parallel threads
-        threading.Thread(target=self._reader_loop, daemon=True, name="VideoReader").start()
-        threading.Thread(target=self._detection_loop, daemon=True, name="YOLODetector").start()
+        # Launch THREE parallel threads, stamping each with the current session gen
+        threading.Thread(target=self._reader_loop,     args=(my_gen,), daemon=True, name="VideoReader").start()
+        threading.Thread(target=self._detection_loop,  daemon=True, name="YOLODetector").start()
         threading.Thread(target=self._compositor_loop, daemon=True, name="Compositor").start()
 
         mode = "video_file" if self._is_video_file else "live"
@@ -185,10 +203,80 @@ class TrackingState:
         return {"status": "stopped"}
 
     # ═══════════════════════════════════════════
+    # CHECKPOINT SWITCHING  (unloads + reloads)
+    # ═══════════════════════════════════════════
+
+    def switch_checkpoint(self, checkpoint: dict):
+        """
+        Unload the current model from VRAM, load the new checkpoint,
+        and restart processing on the same source if it was running.
+        Returns a status dict.
+        """
+        from ultralytics import YOLO
+        import torch, gc
+
+        was_running = self.is_running
+        prev_source = self.video_source
+
+        # 1. Stop current processing
+        if was_running:
+            print(f"[SWITCH] Stopping current processing...")
+            self.stop_processing()
+
+        # 2. Unload model from VRAM
+        if self.model is not None:
+            print(f"[SWITCH] Unloading model from VRAM...")
+            del self.model
+            self.model = None
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            gc.collect()
+            print(f"[SWITCH] VRAM freed.")
+
+        # 3. Load new model
+        print(f"[SWITCH] Loading checkpoint: {checkpoint['label']} ({checkpoint['path']})")
+        self.model = YOLO(checkpoint["path"])
+        self.model.to('cuda')
+        names = self.model.names
+
+        # 4. Resolve class IDs (None = class not present / not needed)
+        pkg_cls = checkpoint.get("package_class")
+        bar_cls = checkpoint.get("barcode_class")
+        self.package_id = next((k for k, v in names.items() if v == pkg_cls), None) if pkg_cls else None
+        self.barcode_id = next((k for k, v in names.items() if v == bar_cls), None) if bar_cls else None
+        self.mode = checkpoint.get("mode", "tracking")
+        self.current_checkpoint = checkpoint
+
+        print(f"[SWITCH] Loaded | mode={self.mode} | "
+              f"package_id={self.package_id} barcode_id={self.barcode_id}")
+
+        # 5. Warm up
+        try:
+            import numpy as np
+            from tracking_config import CONFIG
+            dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+            self.model(dummy, imgsz=CONFIG["imgsz"], verbose=False)
+            torch.cuda.empty_cache()
+            print(f"[SWITCH] Warmup done.")
+        except Exception as e:
+            print(f"[SWITCH] Warmup failed (non-fatal): {e}")
+
+        return {
+            "status": "switched",
+            "checkpoint_id": checkpoint["id"],
+            "label": checkpoint["label"],
+            "mode": self.mode,
+            "was_running": was_running,
+            "prev_source": prev_source,
+        }
+
+    # ═══════════════════════════════════════════
     # THREAD 1: VIDEO READER (smooth, native FPS)
     # ═══════════════════════════════════════════
 
-    def _reader_loop(self):
+    def _reader_loop(self, session_gen: int):
         """Read frames at native FPS. NEVER waits for YOLO. Always smooth."""
         try:
             src = self.video_source
@@ -275,10 +363,14 @@ class TrackingState:
                 except Exception:
                     pass
                 self.cap = None
-            self.is_running = False
-            with self._stats_lock:
-                self.stats["is_running"] = False
-            print("[READER] Stopped")
+            # Only update shared state if this is still the current session;
+            # a newer session may have already set is_running = True.
+            if self._session_gen == session_gen:
+                self.is_running = False
+                with self._stats_lock:
+                    self.stats["is_running"] = False
+            print(f"[READER] Stopped (gen={session_gen})")
+
 
     # ═══════════════════════════════════════════
     # THREAD 2: YOLO + BYTETRACK (parallel)
@@ -306,6 +398,7 @@ class TrackingState:
 
             height, width = first_frame.shape[:2]
             EXIT_LINE_Y = int(height * (1 - CONFIG["exit_line_ratio"]))
+            self._exit_line_y = EXIT_LINE_Y   # store on state — never through overlay
 
             # Immediately publish exit line so compositor can draw it
             with self._overlay_lock:
@@ -346,6 +439,40 @@ class TrackingState:
                     print(f"[DETECTOR] YOLO inference error: {yolo_err}")
                     continue
 
+                # ── DATE DETECTION mode: simple overlay, no tracking ──
+                if self.mode == "date":
+                    date_boxes = []
+                    if results.boxes is not None:
+                        for b in results.boxes:
+                            cls  = int(b.cls)
+                            conf = float(b.conf)
+                            x1, y1, x2, y2 = b.xyxy[0].cpu().numpy()
+                            label = self.model.names.get(cls, str(cls))
+                            date_boxes.append((int(x1), int(y1), int(x2), int(y2),
+                                               f"{label} {conf:.2f}", (0, 200, 255)))
+
+                    det_ms  = (time.time() - t_start) * 1000
+                    det_fps = 1000 / det_ms if det_ms > 0 else 0
+
+                    with self._overlay_lock:
+                        self._overlay = {
+                            'track_boxes':   date_boxes,
+                            'barcode_boxes': [],
+                            'exit_line_y':   self._exit_line_y,
+                            'total_packets': 0,
+                            'fifo_str':      '(date mode)',
+                            'det_fps':       det_fps,
+                            'det_ms':        det_ms,
+                            'frame_idx':     frame_idx,
+                        }
+                    with self._stats_lock:
+                        self.stats.update({
+                            "det_fps":       round(det_fps, 1),
+                            "inference_ms":  round(det_ms, 1),
+                        })
+                    last_processed_idx = frame_idx
+                    continue   # skip tracking logic below
+
                 package_dets = []
                 barcode_dets = []
 
@@ -354,9 +481,9 @@ class TrackingState:
                         cls = int(b.cls)
                         conf = float(b.conf)
                         x1, y1, x2, y2 = b.xyxy[0].cpu().numpy()
-                        if cls == self.package_id and conf >= CONFIG["conf_paquet"]:
+                        if self.package_id is not None and cls == self.package_id and conf >= CONFIG["conf_paquet"]:
                             package_dets.append([x1, y1, x2, y2, conf])
-                        elif cls == self.barcode_id and conf >= CONFIG["conf_barcode"]:
+                        elif self.barcode_id is not None and cls == self.barcode_id and conf >= CONFIG["conf_barcode"]:
                             barcode_dets.append([x1, y1, x2, y2, conf])
 
                 pkg_np = (np.array(package_dets, dtype=np.float32)
@@ -489,24 +616,25 @@ class TrackingState:
                     track_boxes.append((x1, y1, x2, y2, lbl, color))
 
                 # ── Exit line crossing ──
-                for t in tracks:
-                    x1, y1, x2, y2, tid = map(int, t[:5])
-                    if tid not in self.packages:
-                        continue
-                    pkg = self.packages[tid]
-                    if y2 >= EXIT_LINE_Y and tid not in self.packets_crossed_line:
-                        if pkg["decision_locked"]:
-                            self.packets_crossed_line.add(tid)
+                if self._exit_line_enabled:
+                    for t in tracks:
+                        x1, y1, x2, y2, tid = map(int, t[:5])
+                        if tid not in self.packages:
                             continue
-                        self.packets_crossed_line.add(tid)
-                        self.total_packets += 1
-                        self.packet_numbers[tid] = self.total_packets
-                        final = "OK" if pkg["barcode_detected"] else "NOK"
-                        pkg["decision_locked"] = True
-                        pkg["final_decision"] = final
-                        self.output_fifo.append(final)
-                        reason = "BARCODE" if pkg["barcode_detected"] else "NO BARCODE"
-                        print(f"[DET] Packet #{self.total_packets} -> {final} ({reason})")
+                        pkg = self.packages[tid]
+                        if y2 >= EXIT_LINE_Y and tid not in self.packets_crossed_line:
+                            if pkg["decision_locked"]:
+                                self.packets_crossed_line.add(tid)
+                                continue
+                            self.packets_crossed_line.add(tid)
+                            self.total_packets += 1
+                            self.packet_numbers[tid] = self.total_packets
+                            final = "OK" if pkg["barcode_detected"] else "NOK"
+                            pkg["decision_locked"] = True
+                            pkg["final_decision"] = final
+                            self.output_fifo.append(final)
+                            reason = "BARCODE" if pkg["barcode_detected"] else "NO BARCODE"
+                            print(f"[DET] Packet #{self.total_packets} -> {final} ({reason})")
 
                 # ── Detection timing ──
                 det_ms = (time.time() - t_start) * 1000
@@ -595,13 +723,14 @@ class TrackingState:
                 with self._overlay_lock:
                     ov_tracks    = list(self._overlay.get('track_boxes', []))
                     ov_barcodes  = list(self._overlay.get('barcode_boxes', []))
-                    ov_ely       = self._overlay.get('exit_line_y', 0)
                     ov_total     = self._overlay.get('total_packets', 0)
                     ov_fifo      = self._overlay.get('fifo_str', '(empty)')
                     ov_det_fps   = self._overlay.get('det_fps', 0)
                     ov_det_ms    = self._overlay.get('det_ms', 0)
 
-                # ── Exit line: compute from frame dimensions even if detector hasn't started yet ──
+                # ── Exit line: use dedicated attribute (set once by detector, never overwritten) ──
+                # Fall back to frame-based estimate only until detector computes it
+                ov_ely = self._exit_line_y
                 if ov_ely <= 0 and h > 0:
                     ov_ely = int(h * (1 - CONFIG["exit_line_ratio"]))
 
@@ -618,7 +747,7 @@ class TrackingState:
                                 (bx1, by1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
                 # ── Draw exit line (always, even before first detection) ──
-                if ov_ely > 0:
+                if ov_ely > 0 and self._exit_line_enabled:
                     cv2.line(frame, (0, ov_ely), (w, ov_ely), (255, 0, 0), 3)
                     cv2.putText(frame, "EXIT LINE", (w - 200, ov_ely - 10),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)

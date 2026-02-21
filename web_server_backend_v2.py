@@ -20,6 +20,9 @@ from ultralytics import YOLO
 from tracking_config import (
     MODEL_PATH, PACKAGE_CLASS_NAME, BARCODE_CLASS_NAME,
     CONFIG, SERVER_HOST, SERVER_PORT,
+    CHECKPOINTS, CAMERAS,
+    DEFAULT_CHECKPOINT_ID, DEFAULT_CAMERA_ID,
+    get_checkpoint, get_camera,
 )
 from tracking_state import TrackingState
 
@@ -34,17 +37,33 @@ app.config['JSON_SORT_KEYS'] = False
 # ==========================
 state = TrackingState()
 
+# Track which checkpoint / camera are currently active
+current_checkpoint_id = DEFAULT_CHECKPOINT_ID
+current_camera_id     = DEFAULT_CAMERA_ID
 
-def init_models():
+
+def init_models(checkpoint_id=None):
     """Load YOLO model on GPU and warm up."""
-    global state
-    print("Loading YOLO model...")
-    state.model = YOLO(MODEL_PATH)
+    global state, current_checkpoint_id
+    if checkpoint_id is None:
+        checkpoint_id = DEFAULT_CHECKPOINT_ID
+    checkpoint = get_checkpoint(checkpoint_id)
+    if checkpoint is None:
+        raise ValueError(f"Unknown checkpoint id: {checkpoint_id}")
+
+    current_checkpoint_id = checkpoint_id
+    print(f"Loading model: {checkpoint['label']} ({checkpoint['path']})...")
+    state.model = YOLO(checkpoint["path"])
     state.model.to('cuda')
     names = state.model.names
-    state.package_id = [k for k, v in names.items() if v == PACKAGE_CLASS_NAME][0]
-    state.barcode_id = [k for k, v in names.items() if v == BARCODE_CLASS_NAME][0]
-    print(f"Model loaded on GPU. Package={state.package_id}, Barcode={state.barcode_id}")
+
+    pkg_cls = checkpoint.get("package_class")
+    bar_cls = checkpoint.get("barcode_class")
+    state.package_id = next((k for k, v in names.items() if v == pkg_cls), None) if pkg_cls else None
+    state.barcode_id = next((k for k, v in names.items() if v == bar_cls), None) if bar_cls else None
+    state.mode = checkpoint.get("mode", "tracking")
+    state.current_checkpoint = checkpoint
+    print(f"Model loaded on GPU. mode={state.mode} package={state.package_id} barcode={state.barcode_id}")
 
     print("Warming up YOLO (dummy inference)...")
     dummy = np.zeros((640, 640, 3), dtype=np.uint8)
@@ -113,7 +132,14 @@ def api_stop():
 @app.route('/api/stats')
 def api_stats():
     with state._stats_lock:
-        return jsonify(dict(state.stats))
+        s = dict(state.stats)
+    # Enrich with active checkpoint + camera
+    s["checkpoint_id"]    = current_checkpoint_id
+    s["checkpoint_label"] = (state.current_checkpoint or {}).get("label", "")
+    s["checkpoint_mode"]  = state.mode
+    s["camera_id"]        = current_camera_id
+    s["exit_line_enabled"] = state._exit_line_enabled
+    return jsonify(s)
 
 
 @app.route('/api/config', methods=['GET', 'POST'])
@@ -133,6 +159,101 @@ def api_fifo():
         "fifo": state.output_fifo,
         "total_packets": state.total_packets
     })
+
+
+@app.route('/api/exit_line', methods=['POST'])
+def api_exit_line():
+    """Toggle exit line on/off. Returns new state."""
+    state._exit_line_enabled = not state._exit_line_enabled
+    return jsonify({"enabled": state._exit_line_enabled})
+
+
+@app.route('/api/checkpoints')
+def api_checkpoints():
+    """List available checkpoints and which one is active."""
+    return jsonify({
+        "checkpoints": [
+            {**cp, "active": cp["id"] == current_checkpoint_id}
+            for cp in CHECKPOINTS
+        ],
+        "active_id": current_checkpoint_id,
+    })
+
+
+@app.route('/api/cameras')
+def api_cameras():
+    """List available cameras and which one is active."""
+    return jsonify({
+        "cameras": [
+            {**cam, "active": cam["id"] == current_camera_id}
+            for cam in CAMERAS
+        ],
+        "active_id": current_camera_id,
+    })
+
+
+@app.route('/api/switch', methods=['POST'])
+def api_switch():
+    """
+    Switch checkpoint and/or camera.
+    Body: { "checkpoint_id": "date", "camera_id": "cam1" }
+    Either key is optional. Switching unloads the current model from VRAM
+    and loads the new one. If a camera_id is given and no source is provided
+    the camera source from CAMERAS config is used, unless a custom
+    'custom_source' key is supplied.
+    """
+    global current_checkpoint_id, current_camera_id
+
+    data = request.get_json() or {}
+    new_cp_id  = data.get("checkpoint_id")
+    new_cam_id = data.get("camera_id")
+    custom_src = data.get("custom_source")  # free-text source override
+
+    # Resolve new source
+    new_source = None
+    if custom_src:
+        new_source = custom_src
+    elif new_cam_id:
+        cam = get_camera(new_cam_id)
+        if cam is None:
+            return jsonify({"error": f"Unknown camera id: {new_cam_id}"}), 400
+        new_source = cam["source"]
+        current_camera_id = new_cam_id
+
+    # If only camera changed (not checkpoint), just restart with new source
+    if new_cp_id is None or new_cp_id == current_checkpoint_id:
+        if new_source and state.is_running:
+            state.stop_processing()
+            state.start_processing(new_source)
+        elif new_source and not state.is_running:
+            pass  # source remembered but not started
+        return jsonify({
+            "status": "camera_switched",
+            "checkpoint_id": current_checkpoint_id,
+            "camera_id": current_camera_id,
+            "source": new_source,
+        })
+
+    # Checkpoint switch: unload old, load new, restart if was running
+    checkpoint = get_checkpoint(new_cp_id)
+    if checkpoint is None:
+        return jsonify({"error": f"Unknown checkpoint id: {new_cp_id}"}), 400
+
+    # Override source if a new camera was also selected
+    was_running = state.is_running
+    prev_source = state.video_source
+
+    result = state.switch_checkpoint(checkpoint)
+    current_checkpoint_id = new_cp_id
+
+    # Use new_source if provided, otherwise keep existing source
+    target_source = new_source or prev_source
+    if was_running and target_source:
+        state.start_processing(target_source)
+
+    result["source"] = target_source
+    result["camera_id"] = current_camera_id
+    return jsonify(result)
 
 
 # ==========================

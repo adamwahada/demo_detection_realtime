@@ -10,12 +10,16 @@
             background: linear-gradient(135deg, #161b22, #1a2332);
             padding: 16px 24px;
             border-bottom: 1px solid #30363d;
-            display: flex; align-items: center; gap: 16px;
+            display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
         }
         .header h1 { font-size: 1.3em; color: #58a6ff; }
         .mode-badge {
             background: #238636; color: #fff; font-size: 0.75em;
             padding: 3px 10px; border-radius: 12px; font-weight: 600;
+        }
+        .checkpoint-badge {
+            font-size: 0.75em; padding: 3px 10px; border-radius: 12px;
+            font-weight: 600; border: 1px solid #58a6ff; color: #58a6ff;
         }
 
         .main { display: flex; gap: 16px; padding: 16px; height: calc(100vh - 70px); }
@@ -23,6 +27,24 @@
         /* Left: Video + controls */
         .left { flex: 2; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 
+        /* ── Selector row ── */
+        .selectors {
+            display: flex; gap: 8px; align-items: center;
+            background: #161b22; padding: 10px 14px; border-radius: 8px;
+            border: 1px solid #30363d; flex-wrap: wrap;
+        }
+        .select-group { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 180px; }
+        .select-group label { font-size: 0.7em; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+        .sel {
+            padding: 8px 10px; font-size: 13px;
+            background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+            color: #e6edf3; outline: none; cursor: pointer; width: 100%;
+        }
+        .sel:focus { border-color: #58a6ff; }
+        .sel:disabled { opacity: 0.5; cursor: not-allowed; }
+        .sel option.active-opt { color: #3fb950; font-weight: 600; }
+
+        /* ── Controls row ── */
         .controls {
             display: flex; gap: 8px; align-items: center;
             background: #161b22; padding: 10px 14px; border-radius: 8px;
@@ -40,16 +62,30 @@
         }
         .btn-start { background: #238636; color: #fff; }
         .btn-start:hover { background: #2ea043; }
-        .btn-stop { background: #da3633; color: #fff; }
-        .btn-stop:hover { background: #f85149; }
+        .btn-exit-on  { background: #1f6feb; color: #fff; }
+        .btn-exit-on:hover  { background: #388bfd; }
+        .btn-exit-off { background: #484f58; color: #e6edf3; }
+        .btn-exit-off:hover { background: #6e7681; }
+
+        .switching-overlay {
+            display: none; position: fixed; inset: 0; z-index: 999;
+            background: rgba(13,17,23,0.85); align-items: center; justify-content: center;
+            flex-direction: column; gap: 14px;
+        }
+        .switching-overlay.visible { display: flex; }
+        .spinner {
+            width: 40px; height: 40px; border: 4px solid #30363d;
+            border-top-color: #58a6ff; border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .switching-text { color: #58a6ff; font-size: 1.1em; font-weight: 600; }
 
         .stream-container {
             flex: 1; background: #010409; border-radius: 8px; overflow: hidden;
             border: 1px solid #30363d; position: relative; min-height: 0;
         }
-        .stream-container img {
-            width: 100%; height: 100%; object-fit: contain;
-        }
+        .stream-container img { width: 100%; height: 100%; object-fit: contain; }
         .stream-overlay {
             position: absolute; top: 8px; right: 8px;
             display: flex; gap: 6px;
@@ -60,6 +96,7 @@
         }
         .badge-video { color: #3fb950; border: 1px solid #238636; }
         .badge-yolo  { color: #d29922; border: 1px solid #9e6a03; }
+        .badge-mode  { color: #58a6ff; border: 1px solid #1f6feb; }
 
         .legend {
             display: flex; gap: 16px; font-size: 0.8em; padding: 6px 0;
@@ -69,9 +106,7 @@
         .leg-dot { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
 
         /* Right: Stats panel */
-        .right {
-            flex: 0 0 300px; display: flex; flex-direction: column; gap: 12px;
-        }
+        .right { flex: 0 0 300px; display: flex; flex-direction: column; gap: 12px; }
 
         .panel {
             background: #161b22; border: 1px solid #30363d;
@@ -126,160 +161,344 @@
             50% { opacity: 0.4; }
         }
     </style>
-    <script>
-        function startTracking() {
-            const src = document.getElementById('videoSource').value;
-            fetch('/api/start', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ source: src })
-            })
-            .then(r => r.json())
-            .then(d => { console.log(d); })
-            .catch(e => alert('Error: ' + e));
-        }
-
-        function stopTracking() {
-            fetch('/api/stop', { method: 'POST' })
-            .then(r => r.json())
-            .then(d => console.log(d));
-        }
-
-        function updateStats() {
-            fetch('/api/stats')
-            .then(r => r.json())
-            .then(d => {
-                document.getElementById('total').textContent = d.total_packets;
-                document.getElementById('ok').textContent    = d.packages_ok;
-                document.getElementById('nok').textContent   = d.packages_nok;
-                document.getElementById('def').textContent   = d.packages_defective;
-                document.getElementById('vfps').textContent  = d.video_fps || 0;
-                document.getElementById('dfps').textContent  = d.det_fps   || 0;
-                document.getElementById('ms').textContent    = d.inference_ms || 0;
-
-                // Stream badges
-                document.getElementById('badge-vfps').textContent = 'Video: ' + (d.video_fps||0) + ' fps';
-                document.getElementById('badge-dfps').textContent = 'YOLO: ' + (d.det_fps||0) + ' fps';
-
-                // Status
-                const dot = document.getElementById('statusDot');
-                const txt = document.getElementById('statusText');
-                if (d.video_ended) {
-                    dot.className = 'status-dot ended';
-                    txt.textContent = 'Video ended';
-                } else if (d.is_running) {
-                    dot.className = 'status-dot running';
-                    txt.textContent = 'Processing...';
-                } else {
-                    dot.className = 'status-dot';
-                    txt.textContent = 'Idle';
-                }
-
-                // FIFO
-                const box = document.getElementById('fifo');
-                box.innerHTML = '';
-                if (d.fifo_queue && d.fifo_queue.length > 0) {
-                    const total = d.total_packets;
-                    const start = Math.max(1, total - d.fifo_queue.length + 1);
-                    d.fifo_queue.forEach((dec, i) => {
-                        const s = document.createElement('span');
-                        s.className = 'fifo-item fifo-' + dec.toLowerCase();
-                        s.textContent = '#' + (start + i) + ':' + dec;
-                        box.appendChild(s);
-                    });
-                } else {
-                    box.textContent = '(empty)';
-                }
-            });
-        }
-
-        setInterval(updateStats, 400);
-    </script>
 </head>
 <body>
-    <div class="header">
-        <h1>Real-Time Tracking + Barcode Detection</h1>
-        <span class="mode-badge">PARALLEL MODE</span>
-        <div class="status-bar" style="margin-left:auto;">
-            <div class="status-dot" id="statusDot"></div>
-            <span id="statusText">Idle</span>
+
+<!-- Switching overlay (shown while model is loading) -->
+<div class="switching-overlay" id="switchOverlay">
+    <div class="spinner"></div>
+    <div class="switching-text" id="switchMsg">Switching model...</div>
+</div>
+
+<div class="header">
+    <h1>Real-Time Tracking + Barcode Detection</h1>
+    <span class="mode-badge">PARALLEL MODE</span>
+    <span class="checkpoint-badge" id="headerCheckpoint">—</span>
+    <div class="status-bar" style="margin-left:auto;">
+        <div class="status-dot" id="statusDot"></div>
+        <span id="statusText">Idle</span>
+    </div>
+</div>
+
+<div class="main">
+    <!-- Left: Video -->
+    <div class="left">
+
+        <!-- ── Selector row ── -->
+        <div class="selectors">
+            <div class="select-group">
+                <label>&#127919; Checkpoint</label>
+                <select class="sel" id="checkpointSelect" onchange="onCheckpointChange()">
+                    <option value="">Loading…</option>
+                </select>
+            </div>
+            <div class="select-group">
+                <label>&#128247; Camera</label>
+                <select class="sel" id="cameraSelect" onchange="onCameraChange()">
+                    <option value="">Loading…</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- ── Source / start / stop row ── -->
+        <div class="controls">
+            <input type="text" id="videoSource" placeholder="Custom source: /dev/video0 · rtsp://... · /path/video.mp4"
+                title="Leave empty to use the selected camera above"
+                onkeydown="if(event.key==='Enter') startTracking()">
+            <button class="btn-start" onclick="startTracking()">&#9654; Start</button>
+            <button class="btn-stop"  onclick="stopTracking()">&#9632; Stop</button>
+            <button id="btnExitLine" class="btn-exit-on" onclick="toggleExitLine()" title="Toggle exit line">&#9135; Exit Line: ON</button>
+        </div>
+
+        <div class="stream-container">
+            <img src="/video_feed" alt="Video Stream">
+            <div class="stream-overlay">
+                <span class="stream-badge badge-mode"  id="badge-mode">mode: —</span>
+                <span class="stream-badge badge-video" id="badge-vfps">Video: 0 fps</span>
+                <span class="stream-badge badge-yolo"  id="badge-dfps">YOLO: 0 fps</span>
+            </div>
+        </div>
+
+        <div class="legend">
+            <div class="leg-item"><span class="leg-dot" style="background:#3fb950"></span> OK (barcode)</div>
+            <div class="leg-item"><span class="leg-dot" style="background:#f85149"></span> NOK (no barcode)</div>
+            <div class="leg-item"><span class="leg-dot" style="background:#d29922"></span> DEFECTIVE (fallen)</div>
+            <div class="leg-item"><span class="leg-dot" style="background:#58a6ff"></span> Decision locked</div>
+            <div class="leg-item"><span class="leg-dot" style="background:#00c8ff"></span> Date detection</div>
         </div>
     </div>
 
-    <div class="main">
-        <!-- Left: Video -->
-        <div class="left">
-            <div class="controls">
-                <input type="text" id="videoSource" value="/dev/video0"
-                    placeholder="/dev/video0 | /path/to/video.mp4 | rtsp://..."
-                    onkeydown="if(event.key==='Enter') startTracking()">
-                <button class="btn-start" onclick="startTracking()">&#9654; Start</button>
-                <button class="btn-stop"  onclick="stopTracking()">&#9632; Stop</button>
-            </div>
-
-            <div class="stream-container">
-                <img src="/video_feed" alt="Video Stream">
-                <div class="stream-overlay">
-                    <span class="stream-badge badge-video" id="badge-vfps">Video: 0 fps</span>
-                    <span class="stream-badge badge-yolo"  id="badge-dfps">YOLO: 0 fps</span>
+    <!-- Right: Stats -->
+    <div class="right">
+        <div class="panel">
+            <h3>Packet Stats</h3>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-value c-total" id="total">0</div>
+                    <div class="stat-label">Total Packets</div>
                 </div>
-            </div>
-
-            <div class="legend">
-                <div class="leg-item"><span class="leg-dot" style="background:#3fb950"></span> OK (barcode)</div>
-                <div class="leg-item"><span class="leg-dot" style="background:#f85149"></span> NOK (no barcode)</div>
-                <div class="leg-item"><span class="leg-dot" style="background:#d29922"></span> DEFECTIVE (fallen)</div>
-                <div class="leg-item"><span class="leg-dot" style="background:#58a6ff"></span> Decision locked</div>
+                <div class="stat-card">
+                    <div class="stat-value c-ok" id="ok">0</div>
+                    <div class="stat-label">OK &#10003;</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value c-nok" id="nok">0</div>
+                    <div class="stat-label">NOK &#10007;</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value c-def" id="def">0</div>
+                    <div class="stat-label">DEFECTIVE &#9888;</div>
+                </div>
             </div>
         </div>
 
-        <!-- Right: Stats -->
-        <div class="right">
-            <div class="panel">
-                <h3>Packet Stats</h3>
-                <div class="stats-grid">
-                    <div class="stat-card">
-                        <div class="stat-value c-total" id="total">0</div>
-                        <div class="stat-label">Total Packets</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value c-ok" id="ok">0</div>
-                        <div class="stat-label">OK &#10003;</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value c-nok" id="nok">0</div>
-                        <div class="stat-label">NOK &#10007;</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value c-def" id="def">0</div>
-                        <div class="stat-label">DEFECTIVE &#9888;</div>
-                    </div>
+        <div class="panel">
+            <h3>Performance</h3>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-value c-vfps" id="vfps">0</div>
+                    <div class="stat-label">Video FPS</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value c-dfps" id="dfps">0</div>
+                    <div class="stat-label">YOLO FPS</div>
+                </div>
+                <div class="stat-card" style="grid-column: span 2;">
+                    <div class="stat-value c-ms" id="ms">0</div>
+                    <div class="stat-label">Inference (ms)</div>
                 </div>
             </div>
+        </div>
 
-            <div class="panel">
-                <h3>Performance</h3>
-                <div class="stats-grid">
-                    <div class="stat-card">
-                        <div class="stat-value c-vfps" id="vfps">0</div>
-                        <div class="stat-label">Video FPS</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value c-dfps" id="dfps">0</div>
-                        <div class="stat-label">YOLO FPS</div>
-                    </div>
-                    <div class="stat-card" style="grid-column: span 2;">
-                        <div class="stat-value c-ms" id="ms">0</div>
-                        <div class="stat-label">Inference (ms)</div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="panel" style="flex:1; display:flex; flex-direction:column;">
-                <h3>FIFO Queue (last 10)</h3>
-                <div class="fifo-box" id="fifo" style="flex:1;">(empty)</div>
-            </div>
+        <div class="panel" style="flex:1; display:flex; flex-direction:column;">
+            <h3>FIFO Queue (last 10)</h3>
+            <div class="fifo-box" id="fifo" style="flex:1;">(empty)</div>
         </div>
     </div>
+</div>
+
+<script>
+    /* ─── Exit line toggle ─── */
+    let exitLineEnabled = true;
+
+    async function toggleExitLine() {
+        const r = await fetch('/api/exit_line', { method: 'POST' });
+        const d = await r.json();
+        exitLineEnabled = d.enabled;
+        const btn = document.getElementById('btnExitLine');
+        if (exitLineEnabled) {
+            btn.textContent = '\u2501 Exit Line: ON';
+            btn.className = 'btn-exit-on';
+        } else {
+            btn.textContent = '\u2501 Exit Line: OFF';
+            btn.className = 'btn-exit-off';
+        }
+    }
+
+    /* ─── State ─────────────────────────────── */
+    let activeCheckpointId = null;
+    let activeCameraId     = null;
+    let isSwitching        = false;
+
+    /* ─── Bootstrap: load checkpoints + cameras ─── */
+    async function loadSelectors() {
+        const [cpRes, camRes] = await Promise.all([
+            fetch('/api/checkpoints').then(r => r.json()),
+            fetch('/api/cameras').then(r => r.json()),
+        ]);
+
+        const cpSel  = document.getElementById('checkpointSelect');
+        const camSel = document.getElementById('cameraSelect');
+        cpSel.innerHTML  = '';
+        camSel.innerHTML = '';
+
+        cpRes.checkpoints.forEach(cp => {
+            const o = document.createElement('option');
+            o.value = cp.id;
+            o.textContent = cp.active ? '✓ ' + cp.label : cp.label;
+            if (cp.active) { o.className = 'active-opt'; activeCheckpointId = cp.id; }
+            cpSel.appendChild(o);
+        });
+        cpSel.value = cpRes.active_id;
+        activeCheckpointId = cpRes.active_id;
+
+        camRes.cameras.forEach(cam => {
+            const o = document.createElement('option');
+            o.value = cam.id;
+            o.textContent = cam.active ? '✓ ' + cam.label + '  (' + cam.source + ')' 
+                                       : cam.label + '  (' + cam.source + ')';
+            if (cam.active) { o.className = 'active-opt'; activeCameraId = cam.id; }
+            camSel.appendChild(o);
+        });
+        camSel.value = camRes.active_id;
+        activeCameraId = camRes.active_id;
+
+        // Pre-fill source input with active camera source
+        const activeCam = camRes.cameras.find(c => c.id === camRes.active_id);
+        if (activeCam) {
+            document.getElementById('videoSource').placeholder =
+                'Custom source (leave empty to use: ' + activeCam.source + ')';
+        }
+    }
+
+    /* ─── Checkpoint dropdown changed ─── */
+    async function onCheckpointChange() {
+        const newId = document.getElementById('checkpointSelect').value;
+        if (newId === activeCheckpointId || isSwitching) return;
+        await doSwitch({ checkpoint_id: newId });
+    }
+
+    /* ─── Camera dropdown changed ─── */
+    async function onCameraChange() {
+        const newId = document.getElementById('cameraSelect').value;
+        if (newId === activeCameraId || isSwitching) return;
+        await doSwitch({ camera_id: newId });
+    }
+
+    /* ─── Core switch call ─── */
+    async function doSwitch(payload) {
+        isSwitching = true;
+        const overlay = document.getElementById('switchOverlay');
+        const msg     = document.getElementById('switchMsg');
+        overlay.classList.add('visible');
+
+        const cpId  = payload.checkpoint_id;
+        const camId = payload.camera_id;
+        if (cpId) {
+            const lbl = document.querySelector(`#checkpointSelect option[value="${cpId}"]`);
+            msg.textContent = 'Loading: ' + (lbl ? lbl.textContent.replace('✓ ', '') : cpId) + '…';
+        } else if (camId) {
+            msg.textContent = 'Switching camera…';
+        }
+
+        // Disable selectors while switching
+        document.getElementById('checkpointSelect').disabled = true;
+        document.getElementById('cameraSelect').disabled     = true;
+
+        try {
+            const r = await fetch('/api/switch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const d = await r.json();
+            if (d.error) {
+                alert('Switch error: ' + d.error);
+                // Revert selectors
+                document.getElementById('checkpointSelect').value = activeCheckpointId;
+                document.getElementById('cameraSelect').value     = activeCameraId;
+            } else {
+                if (d.checkpoint_id) activeCheckpointId = d.checkpoint_id;
+                if (d.camera_id)     activeCameraId     = d.camera_id;
+                // Refresh selectors to reflect new active state
+                await loadSelectors();
+            }
+        } catch(e) {
+            alert('Switch failed: ' + e);
+        } finally {
+            overlay.classList.remove('visible');
+            document.getElementById('checkpointSelect').disabled = false;
+            document.getElementById('cameraSelect').disabled     = false;
+            isSwitching = false;
+        }
+    }
+
+    /* ─── Start / stop ─── */
+    function startTracking() {
+        // If already running, stop first then restart
+        const doStart = () => {
+            fetch('/api/cameras').then(r => r.json()).then(d => {
+                const customSrc = document.getElementById('videoSource').value.trim();
+                let src = customSrc;
+                if (!src) {
+                    const cam = d.cameras.find(c => c.id === d.active_id);
+                    src = cam ? cam.source : '/dev/video0';
+                }
+                fetch('/api/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ source: src }),
+                }).then(r => r.json()).then(d => console.log(d))
+                  .catch(e => alert('Error: ' + e));
+            });
+        };
+
+        fetch('/api/stats').then(r => r.json()).then(d => {
+            if (d.is_running) {
+                // Auto-stop then start
+                fetch('/api/stop', { method: 'POST' })
+                    .then(r => r.json())
+                    .then(() => setTimeout(doStart, 300));
+            } else {
+                doStart();
+            }
+        }).catch(() => doStart());
+    }
+
+    function stopTracking() {
+        fetch('/api/stop', { method: 'POST' })
+            .then(r => r.json())
+            .then(d => console.log(d));
+    }
+
+    /* ─── Poll stats ─── */
+    function updateStats() {
+        fetch('/api/stats').then(r => r.json()).then(d => {
+            document.getElementById('total').textContent = d.total_packets;
+            document.getElementById('ok').textContent    = d.packages_ok;
+            document.getElementById('nok').textContent   = d.packages_nok;
+            document.getElementById('def').textContent   = d.packages_defective;
+            document.getElementById('vfps').textContent  = d.video_fps  || 0;
+            document.getElementById('dfps').textContent  = d.det_fps    || 0;
+            document.getElementById('ms').textContent    = d.inference_ms || 0;
+
+            document.getElementById('badge-vfps').textContent = 'Video: '  + (d.video_fps||0)  + ' fps';
+            document.getElementById('badge-dfps').textContent = 'YOLO: '   + (d.det_fps||0)    + ' fps';
+            document.getElementById('badge-mode').textContent = 'mode: '   + (d.checkpoint_mode || '—');
+
+            const lbl = d.checkpoint_label || d.checkpoint_id || '—';
+            document.getElementById('headerCheckpoint').textContent = lbl;
+
+            // Sync exit line button with server state
+            if (typeof d.exit_line_enabled !== 'undefined' && d.exit_line_enabled !== exitLineEnabled) {
+                exitLineEnabled = d.exit_line_enabled;
+                const btn = document.getElementById('btnExitLine');
+                btn.textContent = exitLineEnabled ? '\u2501 Exit Line: ON' : '\u2501 Exit Line: OFF';
+                btn.className   = exitLineEnabled ? 'btn-exit-on'      : 'btn-exit-off';
+            }
+
+            // Status dot
+            const dot = document.getElementById('statusDot');
+            const txt = document.getElementById('statusText');
+            if (d.video_ended) {
+                dot.className = 'status-dot ended'; txt.textContent = 'Video ended';
+            } else if (d.is_running) {
+                dot.className = 'status-dot running'; txt.textContent = 'Processing…';
+            } else {
+                dot.className = 'status-dot'; txt.textContent = 'Idle';
+            }
+
+            // FIFO
+            const box = document.getElementById('fifo');
+            box.innerHTML = '';
+            if (d.fifo_queue && d.fifo_queue.length > 0) {
+                const total = d.total_packets;
+                const start = Math.max(1, total - d.fifo_queue.length + 1);
+                d.fifo_queue.forEach((dec, i) => {
+                    const s = document.createElement('span');
+                    s.className = 'fifo-item fifo-' + dec.toLowerCase();
+                    s.textContent = '#' + (start + i) + ':' + dec;
+                    box.appendChild(s);
+                });
+            } else {
+                box.textContent = '(empty)';
+            }
+        });
+    }
+
+    /* ─── Init ─── */
+    loadSelectors();
+    setInterval(updateStats, 400);
+</script>
 </body>
 </html>

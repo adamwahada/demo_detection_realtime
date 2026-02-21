@@ -4,17 +4,69 @@ All tunable parameters are centralized here.
 """
 
 # ==========================
-# MODEL
+# CHECKPOINTS  (add or remove models here)
 # ==========================
-MODEL_PATH = "/home/adam/YOLO_Benchmark/ultralytics/base_models/yolo26-BB(farine+paquet).pt"
-PACKAGE_CLASS_NAME = "package"
-BARCODE_CLASS_NAME = "barcode"
+# mode = "tracking" → full ByteTrack + barcode logic
+# mode = "date"     → simple all-class detection overlay (no tracking)
+CHECKPOINTS = [
+    {
+        "id":            "tracking",
+        "label":         "Tracking Paquet+Detection",
+        "path":          "bestexp2.pt",
+        "mode":          "tracking",
+        "package_class": "package",
+        "barcode_class": "barcode",
+    },
+    {
+        "id":            "date",
+        "label":         "Date Detection",
+        "path":          "yolo26-BB(date).pt",
+        "mode":          "date",
+        "package_class": None,   # all classes are shown
+        "barcode_class": None,
+    },
+]
+
+# Active checkpoint at startup (must match one of the ids above)
+DEFAULT_CHECKPOINT_ID = "tracking"
+
+# ==========================
+# CAMERAS  (add your camera sources here)
+# ==========================
+CAMERAS = [
+    {"id": "cam0", "label": "Camera 0",  "source": "/dev/video0"},
+    {"id": "cam1", "label": "Camera 1",  "source": "/dev/video2"},
+]
+
+DEFAULT_CAMERA_ID = "cam0"
+
+# ==========================
+# LEGACY alias (kept for imports that still use MODEL_PATH)
+# ==========================
+MODEL_PATH          = CHECKPOINTS[0]["path"]
+PACKAGE_CLASS_NAME  = CHECKPOINTS[0]["package_class"]
+BARCODE_CLASS_NAME  = CHECKPOINTS[0]["barcode_class"]
+
+# ==========================
+# HELPER LOOKUPS
+# ==========================
+def get_checkpoint(checkpoint_id):
+    for cp in CHECKPOINTS:
+        if cp["id"] == checkpoint_id:
+            return cp
+    return None
+
+def get_camera(camera_id):
+    for cam in CAMERAS:
+        if cam["id"] == camera_id:
+            return cam
+    return None
 
 # ==========================
 # DETECTION & TRACKING
 # ==========================
 CONFIG = {
-    "conf_paquet": 0.5,
+    "conf_paquet": 0.2,
     "conf_barcode": 0.5,
     "imgsz": 416,
     "track_thresh": 0.5,
