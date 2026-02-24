@@ -13,13 +13,26 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from trackers.bytetrack.bytetrack import BYTETracker
 from helpers import calculate_bbox_metrics, detect_fallen_package
 from tracking_config import (
     CONFIG, VIDEO_EXTENSIONS, JPEG_QUALITY,
     CAMERA_FPS, CAMERA_WIDTH, CAMERA_HEIGHT,
     DETECTOR_FRAME_SKIP,
+    TRACKER_CONFIG,
 )
+
+
+def _write_tracker_yaml():
+    """Write TRACKER_CONFIG dict to a temp YAML file (Ultralytics needs a file path)."""
+    import tempfile
+    content = "\n".join(f"{k}: {v}" for k, v in TRACKER_CONFIG.items())
+    fd, path = tempfile.mkstemp(suffix=".yaml", prefix="bytetrack_")
+    with os.fdopen(fd, "w") as f:
+        f.write(content + "\n")
+    return path
+
+
+TRACKER_YAML_PATH = _write_tracker_yaml()
 
 
 class TrackingState:
@@ -161,13 +174,10 @@ class TrackingState:
             for ext in VIDEO_EXTENSIONS
         )
 
-        # Fresh tracker per session
-        self.tracker = BYTETracker(
-            track_thresh=CONFIG["track_thresh"],
-            track_buffer=CONFIG["track_buffer"],
-            match_thresh=CONFIG["match_thresh"],
-            frame_rate=30
-        )
+        # Reset built-in tracker state for fresh session
+        if hasattr(self.model, 'predictor') and self.model.predictor is not None:
+            self.model.predictor.trackers = []
+            self.model.predictor = None
 
         self._session_gen += 1          # bump before launching so threads capture the right id
         my_gen = self._session_gen
@@ -429,12 +439,24 @@ class TrackingState:
 
                 # ── YOLO Inference (with error handling) ──
                 try:
-                    results = self.model(
-                        frame,
-                        conf=min(CONFIG["conf_paquet"], CONFIG["conf_barcode"]),
-                        imgsz=CONFIG["imgsz"],
-                        verbose=False
-                    )[0]
+                    if self.mode == "tracking":
+                        # Built-in ByteTrack: detection + tracking in one call
+                        results = self.model.track(
+                            frame,
+                            conf=min(CONFIG["conf_paquet"], CONFIG["conf_barcode"]),
+                            imgsz=CONFIG["imgsz"],
+                            verbose=False,
+                            persist=True,
+                            tracker=TRACKER_YAML_PATH,
+                        )[0]
+                    else:
+                        # Date mode: plain detection, no tracking
+                        results = self.model(
+                            frame,
+                            conf=min(CONFIG["conf_paquet"], CONFIG["conf_barcode"]),
+                            imgsz=CONFIG["imgsz"],
+                            verbose=False
+                        )[0]
                 except Exception as yolo_err:
                     print(f"[DETECTOR] YOLO inference error: {yolo_err}")
                     continue
@@ -473,30 +495,28 @@ class TrackingState:
                     last_processed_idx = frame_idx
                     continue   # skip tracking logic below
 
-                package_dets = []
+                # ── Extract tracked packages and barcode detections ──
+                tracks = []
                 barcode_dets = []
 
                 if results.boxes is not None:
-                    for b in results.boxes:
+                    box_ids = results.boxes.id  # track IDs from built-in tracker (may be None)
+                    for i, b in enumerate(results.boxes):
                         cls = int(b.cls)
                         conf = float(b.conf)
                         x1, y1, x2, y2 = b.xyxy[0].cpu().numpy()
                         if self.package_id is not None and cls == self.package_id and conf >= CONFIG["conf_paquet"]:
-                            package_dets.append([x1, y1, x2, y2, conf])
+                            tid = int(box_ids[i]) if box_ids is not None else -1
+                            if tid >= 0:
+                                tracks.append([int(x1), int(y1), int(x2), int(y2), tid])
                         elif self.barcode_id is not None and cls == self.barcode_id and conf >= CONFIG["conf_barcode"]:
                             barcode_dets.append([x1, y1, x2, y2, conf])
-
-                pkg_np = (np.array(package_dets, dtype=np.float32)
-                          if package_dets else np.empty((0, 5), np.float32))
-
-                # ── ByteTrack ──
-                tracks = self.tracker.update(pkg_np, (height, width), (height, width))
 
                 # ── Per-track processing ──
                 track_boxes = []
 
                 for t in tracks:
-                    x1, y1, x2, y2, tid = map(int, t[:5])
+                    x1, y1, x2, y2, tid = int(t[0]), int(t[1]), int(t[2]), int(t[3]), int(t[4])
 
                     # Init new track
                     if tid not in self.packages:

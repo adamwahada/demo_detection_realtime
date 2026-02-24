@@ -22,7 +22,7 @@ CHECKPOINTS = [
         "label":         "Date Detection",
         "path":          "yolo26-BB(date).pt",
         "mode":          "date",
-        "package_class": None,   # all classes are shown
+        "package_class": None,   
         "barcode_class": None,
     },
 ]
@@ -66,12 +66,9 @@ def get_camera(camera_id):
 # DETECTION & TRACKING
 # ==========================
 CONFIG = {
-    "conf_paquet": 0.2,
-    "conf_barcode": 0.5,
-    "imgsz": 416,
-    "track_thresh": 0.5,
-    "track_buffer": 60,
-    "match_thresh": 0.8,
+    "conf_paquet": 0.45,       
+    "conf_barcode": 0.45,
+    "imgsz": 640,  # 416→640: barcodes are small objects, need higher resolution
     "exit_line_ratio": 0.15,
     "exit_line_proximity": 50,
 }
@@ -101,5 +98,26 @@ SERVER_PORT = 5000
 
 # ==========================
 # FRAME SKIP (detector receives 1 frame out of N)
+# Set to 1 to disable skipping — RTX 4090 can run inference on every frame
+# at full speed. Skipping frames breaks Ultralytics persist=True tracker
+# because its Kalman filter expects consecutive input.
 # ==========================
-DETECTOR_FRAME_SKIP = 3
+DETECTOR_FRAME_SKIP = 1
+
+ 
+# ==========================
+# BYTETRACK TRACKER (built-in Ultralytics)
+# ==========================
+# Aligned with old custom ByteTrack that was working:
+#   old track_thresh=0.5 → track_high_thresh=0.5
+#   old 2nd-pass floor = track_thresh*0.9 = 0.45 → track_low_thresh=0.45
+#   old det_thresh = track_thresh+0.1 = 0.6 → new_track_thresh=0.6
+TRACKER_CONFIG = {
+    "tracker_type": "bytetrack",
+    "track_high_thresh": 0.5,
+    "track_low_thresh": 0.45,
+    "new_track_thresh": 0.6,
+    "track_buffer": 60,
+    "match_thresh": 0.8,
+    "fuse_score": True,
+}
