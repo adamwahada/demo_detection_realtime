@@ -4,7 +4,7 @@ Web Server Backend - PARALLEL ARCHITECTURE
 Entry point: Flask routes + model init.
 All logic is split into separate modules:
   - tracking_config.py  : all tunable parameters
-  - helpers.py          : bbox metrics & fallen detection
+  - helpers.py          : bbox metrics
   - tracking_state.py   : TrackingState (reader, detector, compositor threads)
   - templates/index.html: web UI
 """
@@ -19,10 +19,11 @@ from ultralytics import YOLO
 
 from tracking_config import (
     MODEL_PATH, PACKAGE_CLASS_NAME, BARCODE_CLASS_NAME,
-    CONFIG, SERVER_HOST, SERVER_PORT,
+    CONFIG, TRACKER_CONFIG, SERVER_HOST, SERVER_PORT,
     CHECKPOINTS, CAMERAS,
     DEFAULT_CHECKPOINT_ID, DEFAULT_CAMERA_ID,
     get_checkpoint, get_camera,
+    DEVICE,
 )
 from tracking_state import TrackingState
 
@@ -54,23 +55,49 @@ def init_models(checkpoint_id=None):
     current_checkpoint_id = checkpoint_id
     print(f"Loading model: {checkpoint['label']} ({checkpoint['path']})...")
     state.model = YOLO(checkpoint["path"])
-    state.model.to('cuda')
+    # move model to configured device (best-effort)
+    try:
+        state.model.to(DEVICE)
+    except Exception:
+        pass
+    # attempt FP16 conversion when using CUDA
+    try:
+        import torch
+        if str(DEVICE).lower().startswith("cuda") and torch.cuda.is_available():
+            try:
+                getattr(state.model, "model", None).half()
+                print("[INIT] Converted model to FP16 (half precision).")
+            except Exception as e:
+                print(f"[INIT] FP16 conversion failed: {e}")
+    except Exception:
+        pass
     names = state.model.names
 
     pkg_cls = checkpoint.get("package_class")
     bar_cls = checkpoint.get("barcode_class")
+    date_cls = checkpoint.get("date_class")
     state.package_id = next((k for k, v in names.items() if v == pkg_cls), None) if pkg_cls else None
     state.barcode_id = next((k for k, v in names.items() if v == bar_cls), None) if bar_cls else None
+    state.date_id = next((k for k, v in names.items() if v == date_cls), None) if date_cls else None
     state.mode = checkpoint.get("mode", "tracking")
     state.current_checkpoint = checkpoint
-    print(f"Model loaded on GPU. mode={state.mode} package={state.package_id} barcode={state.barcode_id}")
+    print(f"Model loaded on {DEVICE}. mode={state.mode} package={state.package_id} barcode={state.barcode_id} date={state.date_id}")
+
+    # Apply default rotation for this checkpoint
+    default_rot = checkpoint.get("default_rotation", 0) % 4
+    state._rotation_steps = default_rot
+    deg = default_rot * 90
+    with state._stats_lock:
+        state.stats["rotation_deg"] = deg
+    print(f"Default rotation: {deg}° CCW")
 
     print("Warming up YOLO (dummy inference)...")
     dummy = np.zeros((640, 640, 3), dtype=np.uint8)
     try:
         state.model(dummy, imgsz=CONFIG["imgsz"], verbose=False)
         import torch
-        torch.cuda.empty_cache()
+        if DEVICE == 'cuda':
+            torch.cuda.empty_cache()
         print("YOLO warmup complete.")
     except Exception as e:
         print(f"YOLO warmup failed (non-fatal): {e}")
@@ -129,6 +156,43 @@ def api_stop():
     return jsonify(state.stop_processing())
 
 
+@app.route('/api/pause', methods=['POST'])
+def api_pause():
+    """Pause video playback (threads stay alive, cap stays open)."""
+    return jsonify(state.pause_processing())
+
+
+@app.route('/api/resume', methods=['POST'])
+def api_resume():
+    """Resume from pause."""
+    return jsonify(state.resume_processing())
+
+
+@app.route('/api/seek', methods=['POST'])
+def api_seek():
+    """Seek video to a position. Body: {"position": 50} (0-100%)."""
+    data = request.get_json() or {}
+    pct = data.get('position', 0)
+    return jsonify(state.seek_video(pct))
+
+
+@app.route('/api/speed', methods=['POST'])
+def api_speed():
+    """Set playback speed. Body: {"speed": 1.0} (0.1–4.0)."""
+    data = request.get_json() or {}
+    speed = data.get('speed', 1.0)
+    return jsonify(state.set_playback_speed(speed))
+
+
+@app.route('/api/raw_mode', methods=['POST'])
+def api_raw_mode():
+    """Toggle raw mode (video without detection overlay)."""
+    state._raw_mode = not state._raw_mode
+    mode = "raw" if state._raw_mode else "detection"
+    print(f'[RAW MODE] {mode}')
+    return jsonify({"raw_mode": state._raw_mode})
+
+
 @app.route('/api/stats')
 def api_stats():
     with state._stats_lock:
@@ -139,18 +203,47 @@ def api_stats():
     s["checkpoint_mode"]  = state.mode
     s["camera_id"]        = current_camera_id
     s["exit_line_enabled"] = state._exit_line_enabled
+    s["exit_line_vertical"] = state._exit_line_vertical
+    s["rotation_deg"] = (state._rotation_steps % 4) * 90
+    # Current exit line as % from leading edge (for slider sync)
+    s["exit_line_pct"] = state._exit_line_pct
+    # Video playback info
+    s["paused"] = state._paused
+    s["playback_speed"] = state._playback_speed
+    s["raw_mode"] = state._raw_mode
+    s["is_video_file"] = state._is_video_file
+    s["video_pos_frames"] = state._video_pos_frames
+    s["video_total_frames"] = state._video_total_frames
+    vfps = state._video_fps
+    s["video_pos_sec"] = round(state._video_pos_frames / vfps, 1) if vfps > 0 else 0
+    s["video_duration_sec"] = round(state._video_total_frames / vfps, 1) if vfps > 0 else 0
     return jsonify(s)
 
 
 @app.route('/api/config', methods=['GET', 'POST'])
 def api_config():
     if request.method == 'POST':
-        data = request.get_json()
+        import tracking_state as _ts_mod
+        data = request.get_json() or {}
+        tracker_changed = False
         for key, value in data.items():
             if key in CONFIG:
                 CONFIG[key] = value
-        return jsonify({"status": "updated", "config": CONFIG})
-    return jsonify(CONFIG)
+            elif key in TRACKER_CONFIG:
+                TRACKER_CONFIG[key] = value
+                tracker_changed = True
+        # If any tracker param changed, rewrite the YAML and update the
+        # module-level path so the next model.track() call picks it up.
+        if tracker_changed:
+            import tempfile, os as _os
+            content = "\n".join(f"{k}: {v}" for k, v in TRACKER_CONFIG.items())
+            fd, path = tempfile.mkstemp(suffix=".yaml", prefix="bytetrack_")
+            with _os.fdopen(fd, "w") as f:
+                f.write(content + "\n")
+            _ts_mod.TRACKER_YAML_PATH = path
+            print(f"[CONFIG] Tracker YAML regenerated → {path}")
+        return jsonify({"status": "updated", "config": CONFIG, "tracker_config": TRACKER_CONFIG})
+    return jsonify({"config": CONFIG, "tracker_config": TRACKER_CONFIG})
 
 
 @app.route('/api/fifo')
@@ -166,6 +259,46 @@ def api_exit_line():
     """Toggle exit line on/off. Returns new state."""
     state._exit_line_enabled = not state._exit_line_enabled
     return jsonify({"enabled": state._exit_line_enabled})
+
+
+@app.route('/api/exit_line_orientation', methods=['POST'])
+def api_exit_line_orientation():
+    """Toggle exit line between horizontal (False) and vertical (True)."""
+    state._exit_line_vertical = not state._exit_line_vertical
+    state._recompute_exit_line_y()  # recompute with new ref dimension
+    orientation = "vertical" if state._exit_line_vertical else "horizontal"
+    print(f'[EXIT LINE] Orientation set to {orientation}')
+    return jsonify({"vertical": state._exit_line_vertical, "orientation": orientation})
+
+
+@app.route('/api/exit_line_position', methods=['POST'])
+def api_exit_line_position():
+    """Set exit line position as % from top (0–100). Updates live without restart."""
+    data = request.get_json() or {}
+    pct = data.get('position', 85)
+    try:
+        pct = max(5, min(95, int(pct)))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'position must be an integer 0-100'}), 400
+
+    # Update config ratio + live state percentage
+    CONFIG['exit_line_ratio'] = round(1.0 - pct / 100.0, 4)
+    state._exit_line_pct = pct
+
+    # Apply immediately if video is running (frame height known), else queued for next Start
+    if state._frame_height > 0:
+        state._recompute_exit_line_y()
+        print(f'[EXIT LINE] Position set to {pct}% (y/x={state._exit_line_y}, rot={state._rotation_steps*90}\u00b0 CCW)')
+    else:
+        print(f'[EXIT LINE] Position queued at {pct}% (will apply on next Start)')
+    return jsonify({'position_pct': pct, 'exit_line_y': state._exit_line_y})
+
+
+@app.route('/api/rotate', methods=['POST'])
+def api_rotate():
+    """Cycle input rotation by 90° counter-clockwise (0/90/180/270)."""
+    deg = state.cycle_rotation_ccw()
+    return jsonify({"rotation_deg": deg})
 
 
 @app.route('/api/checkpoints')

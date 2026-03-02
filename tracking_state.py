@@ -13,7 +13,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from helpers import calculate_bbox_metrics, detect_fallen_package
+from helpers import calculate_bbox_metrics
 from tracking_config import (
     CONFIG, VIDEO_EXTENSIONS, JPEG_QUALITY,
     CAMERA_FPS, CAMERA_WIDTH, CAMERA_HEIGHT,
@@ -37,9 +37,10 @@ TRACKER_YAML_PATH = _write_tracker_yaml()
 
 class TrackingState:
     """
-    Two independent threads:
-      - Reader:   captures frames at native FPS (smooth video, no YOLO dependency)
-      - Detector: runs YOLO + ByteTrack on latest frame, updates overlay & stats
+    Three independent threads:
+      - Reader:     captures frames at native FPS (smooth video, no YOLO dependency)
+      - Detector:   runs YOLO + ByteTrack on latest frame, updates overlay & stats
+      - Compositor: composites raw frame + detection overlay, encodes JPEG
 
     The video feed composites the latest raw frame with the latest detection
     overlay, so the stream is always smooth regardless of YOLO speed.
@@ -49,6 +50,7 @@ class TrackingState:
         self.model = None
         self.package_id = None
         self.barcode_id = None
+        self.date_id = None
 
         # Active checkpoint info (set by switch_checkpoint / init_models)
         self.mode = "tracking"          # "tracking" or "date"
@@ -60,6 +62,9 @@ class TrackingState:
 
         self.video_source = None
         self.cap = None
+        # External frame source support (callable, iterator, pre-opened capture)
+        self._external_frame_source = None
+        self._cap_owned = False
         self.is_running = False
         self._is_video_file = False
         self._video_ended = False
@@ -89,8 +94,29 @@ class TrackingState:
 
         # ── Exit line Y position (set once by detector from first frame, never via overlay) ──
         self._exit_line_y = 0
+        # ── Exit line as % from leading edge (survives sessions & rotation changes) ──
+        self._exit_line_pct = 85
+        # ── Exit line orientation: False = horizontal (y), True = vertical (x) ──
+        self._exit_line_vertical = False
         # ── Exit line enabled flag (can be toggled via API, survives sessions) ──
         self._exit_line_enabled = True
+        # ── Frame rotation steps (0,1,2,3 => 0°,90°,180°,270° CCW; survives sessions) ──
+        self._rotation_steps = 0
+
+        # ── Pause / resume ──
+        self._paused = False
+        self._pause_event = threading.Event()
+        self._pause_event.set()  # initially not paused
+
+        # ── Video playback controls (video files only) ──
+        self._playback_speed = 1.0
+        self._video_pos_frames = 0
+        self._video_total_frames = 0
+        self._video_fps = 0
+        self._seek_target = None  # frame number to seek to (atomic)
+
+        # ── Raw mode (no detection overlay) ──
+        self._raw_mode = False
 
         # ── Per-session tracking state ──
         self.frame_count = 0
@@ -99,7 +125,6 @@ class TrackingState:
         self.output_fifo = []
         self.packet_numbers = {}
         self.packets_crossed_line = set()
-        self.fallen_decided_tids = set()
 
         # ── Stats for API ──
         self._stats_lock = threading.Lock()
@@ -112,6 +137,7 @@ class TrackingState:
         return {
             'track_boxes': [],
             'barcode_boxes': [],
+            'date_boxes': [],
             'exit_line_y': 0,
             'total_packets': 0,
             'fifo_str': '(empty)',
@@ -129,10 +155,11 @@ class TrackingState:
             "total_packets": 0,
             "packages_ok": 0,
             "packages_nok": 0,
-            "packages_defective": 0,
+            "rotation_deg": 0,
             "fifo_queue": [],
             "is_running": False,
             "video_ended": False,
+            "paused": False,
         }
 
     def _reset_session(self):
@@ -142,15 +169,21 @@ class TrackingState:
         self.output_fifo = []
         self.packet_numbers = {}
         self.packets_crossed_line = set()
-        self.fallen_decided_tids = set()
         self._video_ended = False
         self._raw_frame = None
         self._det_frame = None
         self._det_frame_idx = 0
         self._det_event.clear()
         self._raw_changed.clear()
-        # Reset exit line so a different-resolution camera gets a fresh value;
-        # the compositor fallback (from raw frame height) fills in immediately
+        # Pause/seek reset
+        self._paused = False
+        self._pause_event.set()
+        self._video_pos_frames = 0
+        self._video_total_frames = 0
+        self._video_fps = 0
+        self._seek_target = None
+        # Don't reset _playback_speed, _raw_mode — user preferences survive sessions
+        # Reset exit line Y so detector recomputes it from CONFIG["exit_line_ratio"]
         self._exit_line_y = 0
         with self._jpeg_lock:
             self._jpeg_bytes = None
@@ -158,6 +191,44 @@ class TrackingState:
             self._overlay = self._empty_overlay()
         with self._stats_lock:
             self.stats = self._empty_stats()
+            self.stats["rotation_deg"] = (self._rotation_steps % 4) * 90
+
+    @staticmethod
+    def _rotate_frame_ccw(frame, steps):
+        steps = steps % 4
+        if steps == 1:
+            return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        if steps == 2:
+            return cv2.rotate(frame, cv2.ROTATE_180)
+        if steps == 3:
+            return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        return frame
+
+    def cycle_rotation_ccw(self):
+        self._rotation_steps = (self._rotation_steps + 1) % 4
+        deg = self._rotation_steps * 90
+        with self._stats_lock:
+            self.stats["rotation_deg"] = deg
+        # Recompute _exit_line_y for the new orientation
+        self._recompute_exit_line_y()
+        print(f"[ROTATE] Input rotation set to {deg}° CCW")
+        return deg
+
+    def _recompute_exit_line_y(self):
+        """Recompute pixel exit line position from _exit_line_pct + displayed frame dims.
+
+        _exit_line_vertical = False → horizontal line, ref = displayed height.
+        _exit_line_vertical = True  → vertical line,   ref = displayed width.
+        After rotation 90°/270° the frame is transposed so height↔width swap.
+        """
+        steps = self._rotation_steps % 4
+        transposed = steps in (1, 3)
+        if self._exit_line_vertical:
+            ref = self._frame_height if transposed else self._frame_width
+        else:
+            ref = self._frame_width if transposed else self._frame_height
+        if ref > 0:
+            self._exit_line_y = int(ref * self._exit_line_pct / 100)
 
     # ═══════════════════════════════════════════
     # PUBLIC API
@@ -165,25 +236,50 @@ class TrackingState:
 
     def start_processing(self, video_source):
         if self.is_running:
-            return {"error": "Already processing"}
+            print("[START] Restarting with new source...")
+            self.is_running = False
+            if self.cap:
+                try:
+                    self.cap.release()
+                except Exception:
+                    pass
+                self.cap = None
 
+        # Accept flexible video sources
         self.video_source = video_source
+        self._external_frame_source = None
+        self._cap_owned = False
+        if hasattr(video_source, "read") and callable(getattr(video_source, "read")):
+            self.cap = video_source
+            self._cap_owned = False
+        elif hasattr(video_source, "__iter__") and not isinstance(video_source, (str, bytes)):
+            self._external_frame_source = iter(video_source)
+            self.cap = None
+        elif callable(video_source) and not isinstance(video_source, str):
+            self._external_frame_source = video_source
+            self.cap = None
+
+        # Save current position BEFORE reset so we can resume from it
+        _resume_frame = self._video_pos_frames if self._is_video_file else 0
+        if self._video_ended:
+            _resume_frame = 0
         self._reset_session()
-        self._is_video_file = any(
+        self._is_video_file = isinstance(video_source, str) and any(
             video_source.lower().endswith(ext)
             for ext in VIDEO_EXTENSIONS
         )
+        if self._is_video_file and _resume_frame > 0:
+            self._seek_target = _resume_frame
 
         # Reset built-in tracker state for fresh session
         if hasattr(self.model, 'predictor') and self.model.predictor is not None:
             self.model.predictor.trackers = []
             self.model.predictor = None
 
-        self._session_gen += 1          # bump before launching so threads capture the right id
+        self._session_gen += 1
         my_gen = self._session_gen
         self.is_running = True
 
-        # Launch THREE parallel threads, stamping each with the current session gen
         threading.Thread(target=self._reader_loop,     args=(my_gen,), daemon=True, name="VideoReader").start()
         threading.Thread(target=self._detection_loop,  daemon=True, name="YOLODetector").start()
         threading.Thread(target=self._compositor_loop, daemon=True, name="Compositor").start()
@@ -193,24 +289,78 @@ class TrackingState:
 
     def stop_processing(self):
         self.is_running = False
-        time.sleep(0.5)  # Give threads time to exit cleanly
+        self._paused = False
+        self._pause_event.set()
+        time.sleep(0.5)
         if self.cap:
             try:
-                self.cap.release()
+                if self._cap_owned:
+                    self.cap.release()
             except Exception:
                 pass
             self.cap = None
-        # Force CUDA cleanup to prevent segfault
         try:
             import torch
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         except Exception:
             pass
         import gc
         gc.collect()
         with self._stats_lock:
             self.stats["is_running"] = False
+            self.stats["paused"] = False
         return {"status": "stopped"}
+
+    def pause_processing(self):
+        """Pause playback. Threads stay alive, cap stays open."""
+        if not self.is_running:
+            return {"error": "Not running"}
+        self._paused = True
+        self._pause_event.clear()
+        with self._stats_lock:
+            self.stats["paused"] = True
+        print("[PAUSE] Video paused")
+        return {"status": "paused", "frame": self._video_pos_frames}
+
+    def resume_processing(self):
+        """Resume from pause."""
+        if not self.is_running:
+            return {"error": "Not running"}
+        self._paused = False
+        self._pause_event.set()
+        with self._stats_lock:
+            self.stats["paused"] = False
+        print("[RESUME] Video resumed")
+        return {"status": "resumed"}
+
+    def seek_video(self, position_pct):
+        """Queue a seek to position_pct% (0-100). Reader thread applies it."""
+        if not self._is_video_file or self._video_total_frames <= 0:
+            return {"error": "Seek only available for video files"}
+        pct = max(0, min(100, float(position_pct)))
+        target = int(self._video_total_frames * pct / 100)
+        self._seek_target = target
+        return {"status": "seeking", "target_frame": target, "position_pct": pct}
+
+    def set_playback_speed(self, speed):
+        """Set playback speed multiplier (0.1 – 4.0)."""
+        self._playback_speed = max(0.1, min(4.0, float(speed)))
+        print(f"[SPEED] Playback speed set to {self._playback_speed:.2f}x")
+        return {"speed": self._playback_speed}
+
+    @staticmethod
+    def _compute_iou(box1, box2):
+        """Compute IoU between two (x1,y1,x2,y2) boxes."""
+        ix1 = max(box1[0], box2[0])
+        iy1 = max(box1[1], box2[1])
+        ix2 = min(box1[2], box2[2])
+        iy2 = min(box1[3], box2[3])
+        inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        a1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        a2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        union = a1 + a2 - inter
+        return inter / union if union > 0 else 0.0
 
     # ═══════════════════════════════════════════
     # CHECKPOINT SWITCHING  (unloads + reloads)
@@ -239,7 +389,8 @@ class TrackingState:
             del self.model
             self.model = None
             try:
-                torch.cuda.empty_cache()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             except Exception:
                 pass
             gc.collect()
@@ -247,28 +398,54 @@ class TrackingState:
 
         # 3. Load new model
         print(f"[SWITCH] Loading checkpoint: {checkpoint['label']} ({checkpoint['path']})")
+        from tracking_config import DEVICE
         self.model = YOLO(checkpoint["path"])
-        self.model.to('cuda')
+        try:
+            self.model.to(DEVICE)
+        except Exception:
+            pass
+        # attempt FP16 on CUDA
+        try:
+            if str(DEVICE).lower().startswith("cuda") and torch.cuda.is_available():
+                try:
+                    getattr(self.model, "model", None).half()
+                    print("[SWITCH] Converted model to FP16 (half precision).")
+                except Exception as e:
+                    print(f"[SWITCH] FP16 conversion failed: {e}")
+        except Exception:
+            pass
         names = self.model.names
 
-        # 4. Resolve class IDs (None = class not present / not needed)
+        # 4. Resolve class IDs
         pkg_cls = checkpoint.get("package_class")
         bar_cls = checkpoint.get("barcode_class")
         self.package_id = next((k for k, v in names.items() if v == pkg_cls), None) if pkg_cls else None
         self.barcode_id = next((k for k, v in names.items() if v == bar_cls), None) if bar_cls else None
+        date_cls = checkpoint.get("date_class")
+        self.date_id = next((k for k, v in names.items() if v == date_cls), None) if date_cls else None
         self.mode = checkpoint.get("mode", "tracking")
         self.current_checkpoint = checkpoint
 
         print(f"[SWITCH] Loaded | mode={self.mode} | "
-              f"package_id={self.package_id} barcode_id={self.barcode_id}")
+              f"package_id={self.package_id} barcode_id={self.barcode_id} date_id={self.date_id}")
+
+        # 4b. Apply default rotation for this checkpoint
+        default_rot = checkpoint.get("default_rotation", 0)
+        if default_rot != self._rotation_steps:
+            self._rotation_steps = default_rot % 4
+            deg = self._rotation_steps * 90
+            with self._stats_lock:
+                self.stats["rotation_deg"] = deg
+            self._recompute_exit_line_y()
+            print(f"[SWITCH] Rotation set to {deg}° CCW (checkpoint default)")
 
         # 5. Warm up
         try:
-            import numpy as np
             from tracking_config import CONFIG
             dummy = np.zeros((640, 640, 3), dtype=np.uint8)
             self.model(dummy, imgsz=CONFIG["imgsz"], verbose=False)
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             print(f"[SWITCH] Warmup done.")
         except Exception as e:
             print(f"[SWITCH] Warmup failed (non-fatal): {e}")
@@ -290,32 +467,51 @@ class TrackingState:
         """Read frames at native FPS. NEVER waits for YOLO. Always smooth."""
         try:
             src = self.video_source
-            if src.startswith("rtsp://"):
+            ext_src = self._external_frame_source
+
+            if isinstance(src, str) and src.startswith("rtsp://") and ext_src is None:
                 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
                 self.cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
+                self._cap_owned = True
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            elif self._is_video_file:
+            elif self._is_video_file and ext_src is None:
                 if not Path(src).exists():
                     print(f"[READER] ERROR: File not found: {src}")
                     self.is_running = False
                     return
                 self.cap = cv2.VideoCapture(src)
-            else:
-                self.cap = cv2.VideoCapture(src, cv2.CAP_V4L2)
+                self._cap_owned = True
+            elif ext_src is None and self.cap is None:
+                import platform
+                if isinstance(src, str) and src.isdigit():
+                    src = int(src)
+                if platform.system() == "Windows":
+                    self.cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
+                else:
+                    self.cap = cv2.VideoCapture(src, cv2.CAP_V4L2)
+                self._cap_owned = True
                 self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
                 self.cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-            if not self.cap or not self.cap.isOpened():
+            # Verify capture is opened (skip check for external callable/iterator)
+            if self.cap is not None and not self.cap.isOpened():
                 print(f"[READER] ERROR: Cannot open source: {src}")
                 self.is_running = False
                 return
 
-            fps = self.cap.get(cv2.CAP_PROP_FPS) or 30
-            w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            # Determine FPS/size from capture if available
+            if self.cap is not None:
+                raw_fps = self.cap.get(cv2.CAP_PROP_FPS)
+                fps = raw_fps if raw_fps and raw_fps > 0 else CAMERA_FPS
+                w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            else:
+                fps = CAMERA_FPS
+                w = CAMERA_WIDTH
+                h = CAMERA_HEIGHT
             frame_time = 1.0 / fps
 
             with self._stats_lock:
@@ -324,40 +520,112 @@ class TrackingState:
 
             self._frame_width = w
             self._frame_height = h
+            self._video_fps = fps
 
-            print(f"[READER] Opened: {w}x{h} @ {fps:.0f}fps | "
-                  f"{'Video file' if self._is_video_file else 'Live camera'}")
+            # For video files, get total frame count for timeline
+            if self._is_video_file and self.cap is not None:
+                self._video_total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                dur = self._video_total_frames / fps if fps > 0 else 0
+                print(f"[READER] Opened: {w}x{h} @ {fps:.0f}fps | "
+                      f"Video file | {self._video_total_frames} frames | {dur:.1f}s")
+            else:
+                self._video_total_frames = 0
+                print(f"[READER] Opened: {w}x{h} @ {fps:.0f}fps | Live camera")
 
             while self.is_running:
                 t0 = time.time()
 
-                ret, frame = self.cap.read()
+                # ── Handle seek request (works even while paused) ──
+                _seek = self._seek_target
+                if _seek is not None:
+                    self._seek_target = None
+                    if self.cap is not None:
+                        self.cap.set(cv2.CAP_PROP_POS_FRAMES, _seek)
+                    self._video_pos_frames = _seek
+                    # Reset tracker state on seek
+                    self.packages.clear()
+                    self.packets_crossed_line.clear()
+                    self.total_packets = 0
+                    self.output_fifo.clear()
+                    self.packet_numbers.clear()
+                    if hasattr(self.model, 'predictor') and self.model.predictor is not None:
+                        self.model.predictor.trackers = []
+                        self.model.predictor = None
+                    with self._stats_lock:
+                        self.stats["total_packets"] = 0
+                        self.stats["packages_ok"] = 0
+                        self.stats["packages_nok"] = 0
+                        self.stats["fifo_queue"] = []
+
+                # ── Pause: sleep and re-check (seek above still works) ──
+                if self._paused and _seek is None:
+                    time.sleep(0.05)
+                    continue
+
+                # ── Read frame ──
+                if ext_src is not None and not (hasattr(ext_src, "read") and callable(getattr(ext_src, "read"))):
+                    frm = None
+                    try:
+                        if callable(ext_src):
+                            frm = ext_src()
+                        else:
+                            frm = next(ext_src)
+                    except StopIteration:
+                        ret, frame = False, None
+                    except Exception as e:
+                        print(f"[READER] External source error: {e}")
+                        ret, frame = False, None
+                    else:
+                        if isinstance(frm, tuple) and len(frm) >= 2:
+                            ret, frame = frm[0], frm[1]
+                        else:
+                            frame = frm
+                            ret = frame is not None
+                else:
+                    ret, frame = self.cap.read()
+
                 if not ret:
                     if self._is_video_file:
                         print("[READER] Video file ended")
                         self._video_ended = True
                         with self._stats_lock:
                             self.stats["video_ended"] = True
+                    else:
+                        print("[READER] Source ended or returned no frame")
                     break
 
                 self.frame_count += 1
 
-                # Store raw frame for streaming (always latest)
+                # Track video position for timeline
+                if self._is_video_file and self.cap is not None:
+                    self._video_pos_frames = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+
+                # Optional live rotation
+                rot_steps = self._rotation_steps % 4
+                if rot_steps:
+                    frame = self._rotate_frame_ccw(frame, rot_steps)
+
+                # Store raw frame for streaming
                 with self._raw_lock:
                     self._raw_frame = frame
                 self._raw_changed.set()
 
-                # ── Envoie 1 frame sur N au detector pour stabiliser l'inference ──
+                # Send 1 frame every N to detector
                 if self.frame_count % DETECTOR_FRAME_SKIP == 0:
                     with self._det_lock:
                         self._det_frame = frame.copy()
                         self._det_frame_idx = self.frame_count
                     self._det_event.set()
 
-                # Pour les fichiers vidéo: respecte le FPS natif
+                # If we just processed a seek frame while paused, go back to waiting
+                if self._paused:
+                    continue
+
+                # For video files: respect native FPS (speed-adjusted)
                 if self._is_video_file:
+                    speed = max(0.1, self._playback_speed)
                     elapsed = time.time() - t0
-                    sleep = frame_time - elapsed
+                    sleep = (frame_time / speed) - elapsed
                     if sleep > 0:
                         time.sleep(sleep)
 
@@ -366,21 +634,18 @@ class TrackingState:
             import traceback
             traceback.print_exc()
         finally:
-            time.sleep(0.1)  # Let other threads notice is_running change
-            if self.cap:
+            time.sleep(0.1)
+            if self.cap and self._cap_owned:
                 try:
                     self.cap.release()
                 except Exception:
                     pass
-                self.cap = None
-            # Only update shared state if this is still the current session;
-            # a newer session may have already set is_running = True.
+            self.cap = None
             if self._session_gen == session_gen:
                 self.is_running = False
                 with self._stats_lock:
                     self.stats["is_running"] = False
             print(f"[READER] Stopped (gen={session_gen})")
-
 
     # ═══════════════════════════════════════════
     # THREAD 2: YOLO + BYTETRACK (parallel)
@@ -389,7 +654,6 @@ class TrackingState:
     def _detection_loop(self):
         """Run YOLO + ByteTrack in parallel. Updates overlay & stats independently."""
         try:
-            # Wait for first frame to get dimensions (up to 20s)
             print("[DETECTOR] Waiting for first frame...")
             for attempt in range(200):
                 if not self.is_running:
@@ -407,26 +671,27 @@ class TrackingState:
                 return
 
             height, width = first_frame.shape[:2]
-            EXIT_LINE_Y = int(height * (1 - CONFIG["exit_line_ratio"]))
-            self._exit_line_y = EXIT_LINE_Y   # store on state — never through overlay
+            # Compute from config ratio
+            self._exit_line_pct = round((1.0 - CONFIG["exit_line_ratio"]) * 100)
+            self._recompute_exit_line_y()
 
-            # Immediately publish exit line so compositor can draw it
             with self._overlay_lock:
-                self._overlay['exit_line_y'] = EXIT_LINE_Y
+                self._overlay['exit_line_y'] = self._exit_line_y
 
-            print(f"[DETECTOR] Started | {width}x{height} | Exit Y={EXIT_LINE_Y}")
+            steps = self._rotation_steps % 4
+            orientation = 'horizontal' if steps in (0, 2) else 'vertical'
+            print(f"[DETECTOR] Started | {width}x{height} | Exit={self._exit_line_y}px "
+                  f"({self._exit_line_pct}% | {orientation})")
 
             last_processed_idx = 0
 
             while self.is_running:
-                # Wait for new frame signal (longer timeout=ok, YOLO is slow)
                 if not self._det_event.wait(timeout=1.0):
                     if not self.is_running:
                         break
                     continue
                 self._det_event.clear()
 
-                # Grab latest frame (always the newest, skip any we missed)
                 with self._det_lock:
                     frame = self._det_frame
                     frame_idx = self._det_frame_idx
@@ -437,10 +702,9 @@ class TrackingState:
                 last_processed_idx = frame_idx
                 t_start = time.time()
 
-                # ── YOLO Inference (with error handling) ──
+                # ── YOLO Inference ──
                 try:
                     if self.mode == "tracking":
-                        # Built-in ByteTrack: detection + tracking in one call
                         results = self.model.track(
                             frame,
                             conf=min(CONFIG["conf_paquet"], CONFIG["conf_barcode"]),
@@ -450,7 +714,6 @@ class TrackingState:
                             tracker=TRACKER_YAML_PATH,
                         )[0]
                     else:
-                        # Date mode: plain detection, no tracking
                         results = self.model(
                             frame,
                             conf=min(CONFIG["conf_paquet"], CONFIG["conf_barcode"]),
@@ -461,7 +724,7 @@ class TrackingState:
                     print(f"[DETECTOR] YOLO inference error: {yolo_err}")
                     continue
 
-                # ── DATE DETECTION mode: simple overlay, no tracking ──
+                # ── DATE DETECTION mode ──
                 if self.mode == "date":
                     date_boxes = []
                     if results.boxes is not None:
@@ -480,6 +743,7 @@ class TrackingState:
                         self._overlay = {
                             'track_boxes':   date_boxes,
                             'barcode_boxes': [],
+                            'date_boxes':    [],
                             'exit_line_y':   self._exit_line_y,
                             'total_packets': 0,
                             'fifo_str':      '(date mode)',
@@ -492,15 +756,15 @@ class TrackingState:
                             "det_fps":       round(det_fps, 1),
                             "inference_ms":  round(det_ms, 1),
                         })
-                    last_processed_idx = frame_idx
-                    continue   # skip tracking logic below
+                    continue
 
-                # ── Extract tracked packages and barcode detections ──
+                # ── Extract tracked packages, barcode and date detections ──
                 tracks = []
                 barcode_dets = []
+                date_dets = []
 
                 if results.boxes is not None:
-                    box_ids = results.boxes.id  # track IDs from built-in tracker (may be None)
+                    box_ids = results.boxes.id
                     for i, b in enumerate(results.boxes):
                         cls = int(b.cls)
                         conf = float(b.conf)
@@ -511,6 +775,8 @@ class TrackingState:
                                 tracks.append([int(x1), int(y1), int(x2), int(y2), tid])
                         elif self.barcode_id is not None and cls == self.barcode_id and conf >= CONFIG["conf_barcode"]:
                             barcode_dets.append([x1, y1, x2, y2, conf])
+                        elif self.date_id is not None and cls == self.date_id and conf >= CONFIG.get("conf_date", 0.45):
+                            date_dets.append([int(x1), int(y1), int(x2), int(y2), conf])
 
                 # ── Per-track processing ──
                 track_boxes = []
@@ -518,92 +784,29 @@ class TrackingState:
                 for t in tracks:
                     x1, y1, x2, y2, tid = int(t[0]), int(t[1]), int(t[2]), int(t[3]), int(t[4])
 
-                    # Init new track
                     if tid not in self.packages:
+                        inherited_barcode = False
+                        new_bbox = (x1, y1, x2, y2)
+                        for etid, epkg in self.packages.items():
+                            if epkg.get("barcode_detected") and epkg.get("prev_bbox"):
+                                if self._compute_iou(new_bbox, epkg["prev_bbox"]) > 0.3:
+                                    inherited_barcode = True
+                                    print(f"[DET] Track {tid} inherited barcode from Track {etid} (IoU match)")
+                                    break
                         self.packages[tid] = {
-                            "barcode_detected": False,
+                            "barcode_detected": inherited_barcode,
                             "decision_locked": False,
                             "final_decision": None,
-                            "is_fallen": False,
                             "prev_bbox": None,
                             "prev_area": None,
-                            "healthy_area": None,
                             "frames_tracked": 0,
                             "first_frame": frame_idx,
                         }
 
                     pkg = self.packages[tid]
-
-                    # ── Handle already-fallen debris ──
-                    if pkg["is_fallen"] and pkg["decision_locked"]:
-                        curr_area = (x2 - x1) * (y2 - y1)
-                        prev_area = pkg["prev_area"] or 0
-                        healthy_area = pkg["healthy_area"] or 0
-
-                        area_jump = prev_area > 0 and (curr_area - prev_area) / prev_area > 0.40
-                        center_jump = False
-                        if pkg["prev_bbox"] is not None:
-                            pcx = (pkg["prev_bbox"][0] + pkg["prev_bbox"][2]) / 2
-                            pcy = (pkg["prev_bbox"][1] + pkg["prev_bbox"][3]) / 2
-                            d = (((x1 + x2) / 2 - pcx) ** 2 + ((y1 + y2) / 2 - pcy) ** 2) ** 0.5
-                            center_jump = d > max(width, height) * 0.12
-
-                        is_new = ((healthy_area > 0 and curr_area > healthy_area * 0.75)
-                                  or area_jump or center_jump)
-
-                        if is_new:
-                            print(f"[DET Frame {frame_idx}] Track {tid} REUSED: new package")
-                            self.packets_crossed_line.discard(tid)
-                            self.packet_numbers.pop(tid, None)
-                            self.fallen_decided_tids.discard(tid)
-                            self.packages[tid] = {
-                                "barcode_detected": False,
-                                "decision_locked": False,
-                                "final_decision": None,
-                                "is_fallen": False,
-                                "prev_bbox": (x1, y1, x2, y2),
-                                "prev_area": curr_area,
-                                "healthy_area": None,
-                                "frames_tracked": 1,
-                                "first_frame": frame_idx,
-                            }
-                            pkg = self.packages[tid]
-                        else:
-                            # Still debris
-                            pkg["prev_bbox"] = (x1, y1, x2, y2)
-                            pkg["prev_area"] = curr_area
-                            pn = self.packet_numbers.get(tid, '?')
-                            track_boxes.append((x1, y1, x2, y2,
-                                                f"#{pn} DEFECTIVE", (128, 128, 128)))
-                            continue
-
                     pkg["frames_tracked"] += 1
                     bbox = (x1, y1, x2, y2)
 
-                    # ── Fallen detection ──
-                    is_fallen = detect_fallen_package(bbox, pkg["prev_bbox"])
-                    if is_fallen and not pkg["is_fallen"]:
-                        pkg["is_fallen"] = True
-                        pkg["healthy_area"] = pkg["prev_area"]
-                        if not pkg["decision_locked"]:
-                            self.total_packets += 1
-                            self.packet_numbers[tid] = self.total_packets
-                            pkg["decision_locked"] = True
-                            pkg["final_decision"] = "DEFECTIVE"
-                            self.output_fifo.append("DEFECTIVE")
-                            self.fallen_decided_tids.add(tid)
-                            self.packets_crossed_line.add(tid)
-                            print(f"[DET] Packet #{self.total_packets} -> DEFECTIVE (fallen)")
-
-                        ca, _ = calculate_bbox_metrics(x1, y1, x2, y2)
-                        pkg["prev_bbox"] = bbox
-                        pkg["prev_area"] = ca
-                        pn = self.packet_numbers.get(tid, '?')
-                        track_boxes.append((x1, y1, x2, y2,
-                                            f"#{pn} DEFECTIVE", (0, 0, 255)))
-                        continue
-
-                    # Update bbox metrics
                     ca, _ = calculate_bbox_metrics(x1, y1, x2, y2)
                     pkg["prev_bbox"] = bbox
                     pkg["prev_area"] = ca
@@ -617,7 +820,7 @@ class TrackingState:
                                 print(f"[DET] Barcode on Track {tid} conf={bc:.3f}")
                                 break
 
-                    # ── Visualization data ──
+                    # ── Visualization ──
                     if pkg["decision_locked"]:
                         color = (255, 165, 0)
                         status = pkg["final_decision"]
@@ -635,14 +838,17 @@ class TrackingState:
 
                     track_boxes.append((x1, y1, x2, y2, lbl, color))
 
-                # ── Exit line crossing ──
+                # ── Exit line crossing (horizontal: y2; vertical: x2) ──
                 if self._exit_line_enabled:
+                    current_exit = self._exit_line_y
+                    line_is_vert = self._exit_line_vertical
                     for t in tracks:
                         x1, y1, x2, y2, tid = map(int, t[:5])
                         if tid not in self.packages:
                             continue
                         pkg = self.packages[tid]
-                        if y2 >= EXIT_LINE_Y and tid not in self.packets_crossed_line:
+                        crossed_check = (x2 >= current_exit) if line_is_vert else (y2 >= current_exit)
+                        if crossed_check and tid not in self.packets_crossed_line:
                             if pkg["decision_locked"]:
                                 self.packets_crossed_line.add(tid)
                                 continue
@@ -667,16 +873,18 @@ class TrackingState:
                     fifo_items.append(f"#{i}:{d}")
                 fifo_str = " | ".join(fifo_items) if fifo_items else "(empty)"
 
-                # Barcode overlay
                 barcode_vis = [(int(bx1), int(by1), int(bx2), int(by2), bc)
                                for bx1, by1, bx2, by2, bc in barcode_dets]
 
-                # ── Store overlay for video feed ──
+                date_vis = [(dx1, dy1, dx2, dy2, dc)
+                            for dx1, dy1, dx2, dy2, dc in date_dets]
+
                 with self._overlay_lock:
                     self._overlay = {
                         'track_boxes': track_boxes,
                         'barcode_boxes': barcode_vis,
-                        'exit_line_y': EXIT_LINE_Y,
+                        'date_boxes': date_vis,
+                        'exit_line_y': self._exit_line_y,
                         'total_packets': self.total_packets,
                         'fifo_str': fifo_str,
                         'det_fps': det_fps,
@@ -684,10 +892,8 @@ class TrackingState:
                         'frame_idx': frame_idx,
                     }
 
-                # ── Update API stats ──
                 ok = self.output_fifo.count("OK")
                 nok = self.output_fifo.count("NOK")
-                defective = self.output_fifo.count("DEFECTIVE")
 
                 with self._stats_lock:
                     self.stats.update({
@@ -696,7 +902,7 @@ class TrackingState:
                         "total_packets": self.total_packets,
                         "packages_ok": ok,
                         "packages_nok": nok,
-                        "packages_defective": defective,
+                        "rotation_deg": (self._rotation_steps % 4) * 90,
                         "fifo_queue": list(self.output_fifo[-10:]),
                     })
 
@@ -716,21 +922,18 @@ class TrackingState:
         Continuously composites raw frame + detection overlay and
         pre-encodes to JPEG bytes. The MJPEG feed just yields these
         bytes instantly — zero computation in the request handler.
-        Runs at native video FPS, woken by _raw_changed event.
         """
         encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
         print("[COMPOSITOR] Started")
 
         try:
             while self.is_running or self._video_ended:
-                # Block until reader produces a new frame (or timeout)
                 got = self._raw_changed.wait(timeout=0.1)
                 if not self.is_running and not self._video_ended:
                     break
                 if got:
                     self._raw_changed.clear()
 
-                # Grab latest raw frame
                 with self._raw_lock:
                     raw = self._raw_frame
                 if raw is None:
@@ -739,20 +942,39 @@ class TrackingState:
                 frame = raw.copy()
                 h, w = frame.shape[:2]
 
-                # Grab latest overlay (from detector thread)
+                # ── RAW MODE: skip all detection overlays ──
+                if self._raw_mode:
+                    cv2.putText(frame, "RAW", (w - 100, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 140, 255), 2)
+                    cv2.putText(frame, f"Frame: {self.frame_count}",
+                                (w - 180, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+                    if self._paused:
+                        cv2.putText(frame, "|| PAUSED", (10, 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+                    ret, buf = cv2.imencode('.jpg', frame, encode_params)
+                    if ret:
+                        with self._jpeg_lock:
+                            self._jpeg_bytes = buf.tobytes()
+                    if self._video_ended and not self.is_running:
+                        break
+                    continue
+
+                # Grab latest overlay
                 with self._overlay_lock:
                     ov_tracks    = list(self._overlay.get('track_boxes', []))
                     ov_barcodes  = list(self._overlay.get('barcode_boxes', []))
+                    ov_dates     = list(self._overlay.get('date_boxes', []))
                     ov_total     = self._overlay.get('total_packets', 0)
                     ov_fifo      = self._overlay.get('fifo_str', '(empty)')
                     ov_det_fps   = self._overlay.get('det_fps', 0)
                     ov_det_ms    = self._overlay.get('det_ms', 0)
 
-                # ── Exit line: use dedicated attribute (set once by detector, never overwritten) ──
-                # Fall back to frame-based estimate only until detector computes it
                 ov_ely = self._exit_line_y
-                if ov_ely <= 0 and h > 0:
-                    ov_ely = int(h * (1 - CONFIG["exit_line_ratio"]))
+                ov_line_vert = self._exit_line_vertical
+                if ov_ely <= 0:
+                    ref = w if ov_line_vert else h
+                    if ref > 0:
+                        ov_ely = int(ref * self._exit_line_pct / 100)
 
                 # ── Draw detection boxes ──
                 for (x1, y1, x2, y2, label, color) in ov_tracks:
@@ -766,11 +988,22 @@ class TrackingState:
                     cv2.putText(frame, f"barcode {bc:.2f}",
                                 (bx1, by1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
-                # ── Draw exit line (always, even before first detection) ──
+                # ── Draw date boxes (black) ──
+                for (dx1, dy1, dx2, dy2, dc) in ov_dates:
+                    cv2.rectangle(frame, (dx1, dy1), (dx2, dy2), (0, 0, 0), 2)
+                    cv2.putText(frame, f"date {dc:.2f}",
+                                (dx1, dy1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+
+                # ── Draw exit line (horizontal or vertical) ──
                 if ov_ely > 0 and self._exit_line_enabled:
-                    cv2.line(frame, (0, ov_ely), (w, ov_ely), (255, 0, 0), 3)
-                    cv2.putText(frame, "EXIT LINE", (w - 200, ov_ely - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+                    if ov_line_vert:
+                        cv2.line(frame, (ov_ely, 0), (ov_ely, h), (255, 0, 0), 3)
+                        cv2.putText(frame, "EXIT", (ov_ely + 6, 36),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+                    else:
+                        cv2.line(frame, (0, ov_ely), (w, ov_ely), (255, 0, 0), 3)
+                        cv2.putText(frame, "EXIT LINE", (w - 200, ov_ely - 10),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
 
                 # ── HUD ──
                 cv2.putText(frame, f"FIFO: {ov_fifo}", (10, 30),
@@ -778,7 +1011,6 @@ class TrackingState:
                 cv2.putText(frame, f"TOTAL: {ov_total}",
                             (w - 250, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
-                # Show "Waiting for YOLO..." before first detection arrives
                 if ov_det_ms == 0 and len(ov_tracks) == 0:
                     cv2.putText(frame, "YOLO: warming up...",
                                 (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
@@ -790,13 +1022,17 @@ class TrackingState:
                 cv2.putText(frame, f"Frame: {self.frame_count}",
                             (w - 180, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
 
-                # ── Encode to JPEG once (reused by all browser clients) ──
+                # Pause indicator
+                if self._paused:
+                    cv2.putText(frame, "|| PAUSED", (w // 2 - 80, 40),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 200, 255), 2)
+
+                # ── Encode JPEG ──
                 ret, buf = cv2.imencode('.jpg', frame, encode_params)
                 if ret:
                     with self._jpeg_lock:
                         self._jpeg_bytes = buf.tobytes()
 
-                # If video ended, keep last frame encoded and exit
                 if self._video_ended and not self.is_running:
                     break
 
