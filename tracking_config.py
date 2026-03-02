@@ -16,6 +16,7 @@ CHECKPOINTS = [
         "mode":          "tracking",
         "package_class": "package",
         "barcode_class": "barcode",
+        "date_class":    None,
     },
     {
         "id":            "date",
@@ -24,6 +25,16 @@ CHECKPOINTS = [
         "mode":          "date",
         "package_class": None,   
         "barcode_class": None,
+        "date_class":    None,
+    },
+    {
+        "id":            "barcode_date",
+        "label":         "Tracking Paquet+Barcode+Date",
+        "path":          "yolo26m_BB_barcode_date.pt",
+        "mode":          "tracking",
+        "package_class": "package",
+        "barcode_class": "barcode",
+        "date_class":    "date",
     },
 ]
 
@@ -34,8 +45,8 @@ DEFAULT_CHECKPOINT_ID = "tracking"
 # CAMERAS  (add your camera sources here)
 # ==========================
 CAMERAS = [
-    {"id": "cam0", "label": "Camera 0",  "source": "/dev/video0"},
-    {"id": "cam1", "label": "Camera 1",  "source": "/dev/video2"},
+    {"id": "cam0", "label": "Camera 0",  "source": 0},
+    {"id": "cam1", "label": "Camera 1",  "source": 1},
 ]
 
 DEFAULT_CAMERA_ID = "cam0"
@@ -63,12 +74,18 @@ def get_camera(camera_id):
     return None
 
 # ==========================
+# DEVICE  ('cpu' or 'cuda')
+# ==========================
+DEVICE = 'cuda'  # NVIDIA GPU
+
+# ==========================
 # DETECTION & TRACKING
 # ==========================
 CONFIG = {
     "conf_paquet": 0.45,       
     "conf_barcode": 0.45,
-    "imgsz": 640,  # 416→640: barcodes are small objects, need higher resolution
+    "conf_date": 0.30,
+    "imgsz": 416,
     "exit_line_ratio": 0.15,
     "exit_line_proximity": 50,
 }
@@ -76,7 +93,7 @@ CONFIG = {
 # ==========================
 # CAMERA DEFAULTS
 # ==========================
-CAMERA_FPS = 30
+CAMERA_FPS = 60
 CAMERA_WIDTH = 1280
 CAMERA_HEIGHT = 720
 

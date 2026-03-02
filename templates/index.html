@@ -66,6 +66,22 @@
         .btn-exit-on:hover  { background: #388bfd; }
         .btn-exit-off { background: #484f58; color: #e6edf3; }
         .btn-exit-off:hover { background: #6e7681; }
+        .btn-rot { background: #6f42c1; color: #fff; }
+        .btn-rot:hover { background: #8250df; }
+        .btn-stop { background: #da3633; color: #fff; }
+        .btn-stop:hover { background: #f85149; }
+        .btn-resume { background: #1f6feb; color: #fff; }
+        .btn-resume:hover { background: #388bfd; }
+        .btn-stop:disabled, .btn-resume:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        /* Speed buttons */
+        .speed-btn {
+            background: #21262d; border: 1px solid #30363d; color: #8b949e;
+            border-radius: 4px; padding: 3px 8px; cursor: pointer; font-size: 0.75em;
+            font-weight: 600; transition: all 0.15s;
+        }
+        .speed-btn:hover { border-color: #58a6ff; color: #c9d1d9; }
+        .speed-btn.speed-active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
 
         .switching-overlay {
             display: none; position: fixed; inset: 0; z-index: 999;
@@ -160,9 +176,119 @@
             0%, 100% { opacity: 1; }
             50% { opacity: 0.4; }
         }
+
+        /* ── Toast notifications ── */
+        #toast-container {
+            position: fixed; bottom: 24px; right: 24px;
+            display: flex; flex-direction: column; gap: 8px;
+            z-index: 9999; pointer-events: none;
+        }
+        .toast {
+            padding: 10px 18px; border-radius: 8px; font-size: 0.85em;
+            font-weight: 600; opacity: 0; transform: translateX(40px);
+            transition: opacity 0.3s, transform 0.3s;
+            pointer-events: none; max-width: 320px;
+        }
+        .toast.show { opacity: 1; transform: translateX(0); }
+        .toast-info    { background: #1f3a5f; border: 1px solid #58a6ff; color: #58a6ff; }
+        .toast-success { background: #0d2818; border: 1px solid #3fb950; color: #3fb950; }
+        .toast-warn    { background: #3d2a00; border: 1px solid #d29922; color: #d29922; }
+        .toast-error   { background: #3d1114; border: 1px solid #f85149; color: #f85149; }
+
+        /* ── Thresholds modal ── */
+        .modal-backdrop {
+            display: none; position: fixed; inset: 0; z-index: 1000;
+            background: rgba(0,0,0,0.65); align-items: center; justify-content: center;
+        }
+        .modal-backdrop.open { display: flex; }
+        .modal {
+            background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+            padding: 24px 28px; min-width: 380px; max-width: 480px; width: 90%;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+        }
+        .modal h2 { font-size: 1em; color: #58a6ff; margin-bottom: 18px; letter-spacing: 0.3px; }
+        .modal-section { font-size: 0.7em; color: #8b949e; text-transform: uppercase;
+            letter-spacing: 0.6px; margin: 14px 0 8px; border-bottom: 1px solid #21262d; padding-bottom: 4px; }
+        .modal-row {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 12px; margin-bottom: 10px;
+        }
+        .modal-row label { font-size: 0.83em; color: #c9d1d9; flex: 1; }
+        .modal-row input[type=number] {
+            width: 90px; padding: 5px 8px; font-size: 0.85em;
+            background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+            color: #e6edf3; outline: none; text-align: right;
+        }
+        .modal-row input[type=number]:focus { border-color: #58a6ff; }
+        .modal-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+        .btn-modal-cancel { background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+            border-radius: 6px; padding: 7px 18px; cursor: pointer; font-size: 0.85em; }
+        .btn-modal-cancel:hover { border-color: #8b949e; }
+        .btn-modal-apply  { background: #238636; border: none; color: #fff;
+            border-radius: 6px; padding: 7px 20px; cursor: pointer; font-size: 0.85em; font-weight: 600; }
+        .btn-modal-apply:hover  { background: #2ea043; }
+        .btn-settings { background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+            border-radius: 6px; padding: 8px 14px; cursor: pointer; font-size: 13px;
+            font-weight: 600; white-space: nowrap; }
+        .btn-settings:hover { border-color: #58a6ff; color: #58a6ff; }
     </style>
 </head>
 <body>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<!-- Thresholds modal -->
+<div class="modal-backdrop" id="threshModal" onclick="_threshModalBgClick(event)">
+  <div class="modal" id="threshModalBox">
+    <h2>&#9881; Detection &amp; Tracker Thresholds</h2>
+
+    <div class="modal-section">Detection Confidence</div>
+    <div class="modal-row">
+      <label>Package confidence <span style="color:#8b949e;font-size:0.85em">(conf_paquet)</span></label>
+      <input type="number" id="cfg_conf_paquet" min="0.01" max="1" step="0.01">
+    </div>
+    <div class="modal-row">
+      <label>Barcode confidence <span style="color:#8b949e;font-size:0.85em">(conf_barcode)</span></label>
+      <input type="number" id="cfg_conf_barcode" min="0.01" max="1" step="0.01">
+    </div>
+    <div class="modal-row">
+      <label>Date confidence <span style="color:#8b949e;font-size:0.85em">(conf_date)</span></label>
+      <input type="number" id="cfg_conf_date" min="0.01" max="1" step="0.01">
+    </div>
+    <div class="modal-row">
+      <label>Inference size <span style="color:#8b949e;font-size:0.85em">(imgsz)</span></label>
+      <input type="number" id="cfg_imgsz" min="128" max="1280" step="32">
+    </div>
+
+    <div class="modal-section">ByteTrack Tracker</div>
+    <div class="modal-row">
+      <label>High thresh <span style="color:#8b949e;font-size:0.85em">(track_high_thresh)</span></label>
+      <input type="number" id="cfg_track_high_thresh" min="0.01" max="1" step="0.01">
+    </div>
+    <div class="modal-row">
+      <label>Low thresh <span style="color:#8b949e;font-size:0.85em">(track_low_thresh)</span></label>
+      <input type="number" id="cfg_track_low_thresh" min="0.01" max="1" step="0.01">
+    </div>
+    <div class="modal-row">
+      <label>New track thresh <span style="color:#8b949e;font-size:0.85em">(new_track_thresh)</span></label>
+      <input type="number" id="cfg_new_track_thresh" min="0.01" max="1" step="0.01">
+    </div>
+    <div class="modal-row">
+      <label>Match thresh <span style="color:#8b949e;font-size:0.85em">(match_thresh)</span></label>
+      <input type="number" id="cfg_match_thresh" min="0.01" max="1" step="0.01">
+    </div>
+    <div class="modal-row">
+      <label>Track buffer (frames) <span style="color:#8b949e;font-size:0.85em">(track_buffer)</span></label>
+      <input type="number" id="cfg_track_buffer" min="1" max="300" step="1">
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn-modal-cancel" onclick="closeThreshModal()">Cancel</button>
+      <button class="btn-modal-apply"  onclick="applyThresholds()">&#10003; Apply</button>
+    </div>
+  </div>
+</div>
 
 <!-- Switching overlay (shown while model is loading) -->
 <div class="switching-overlay" id="switchOverlay">
@@ -206,8 +332,27 @@
                 title="Leave empty to use the selected camera above"
                 onkeydown="if(event.key==='Enter') startTracking()">
             <button class="btn-start" onclick="startTracking()">&#9654; Start</button>
-            <button class="btn-stop"  onclick="stopTracking()">&#9632; Stop</button>
+            <button id="btnPause" class="btn-stop" onclick="togglePause()" disabled>&#10074;&#10074; Pause</button>
             <button id="btnExitLine" class="btn-exit-on" onclick="toggleExitLine()" title="Toggle exit line">&#9135; Exit Line: ON</button>
+            <button id="btnRotate" class="btn-rot" onclick="rotateInput90()" title="Rotate input 90° counter-clockwise">&#8634; Rotate: 0°</button>
+            <button class="btn-settings" onclick="openThreshModal()" title="Configure detection thresholds">&#9881; Thresholds</button>
+        </div>
+
+        <!-- ── Exit line position slider ── -->
+        <div style="display:flex; align-items:center; gap:12px; background:#161b22;
+                    padding:8px 14px; border-radius:8px; border:1px solid #30363d;">
+            <span id="exitLineAxisLabel" style="font-size:0.75em; color:#8b949e; white-space:nowrap; text-transform:uppercase; letter-spacing:0.5px;">Exit Line &mdash; % from top</span>
+            <input type="range" id="exitLineSlider" min="10" max="95" value="85" step="1"
+                style="flex:1; accent-color:#58a6ff; cursor:pointer;"
+                oninput="onExitLineSliderInput(this.value)"
+                onchange="onExitLineSliderCommit(this.value)">
+            <span id="exitLinePctLabel" style="font-size:0.85em; font-weight:600; color:#58a6ff; min-width:38px; text-align:right;">85%</span>
+            <button id="btnExitLineOrient" onclick="toggleExitLineOrientation()"
+                title="Toggle exit line between horizontal and vertical"
+                style="background:#21262d; border:1px solid #30363d; color:#c9d1d9; border-radius:6px;
+                       padding:4px 10px; cursor:pointer; font-size:0.8em; white-space:nowrap;">
+                &#11020; Horizontal
+            </button>
         </div>
 
         <div class="stream-container">
@@ -219,10 +364,34 @@
             </div>
         </div>
 
+        <!-- ── Video playback controls (only useful for video files) ── -->
+        <div id="videoControlsBar" style="display:flex; align-items:center; gap:10px; background:#161b22;
+                    padding:8px 14px; border-radius:8px; border:1px solid #30363d; flex-wrap:wrap;">
+            <!-- Timeline -->
+            <span id="videoTimeLabel" style="font-size:0.8em; color:#8b949e; min-width:95px;">0:00 / 0:00</span>
+            <input type="range" id="videoTimeline" min="0" max="1000" value="0" step="1"
+                style="flex:1; accent-color:#f0883e; cursor:pointer; min-width:120px;"
+                oninput="onTimelineInput(this.value)"
+                onchange="onTimelineCommit(this.value)">
+            <!-- Speed buttons -->
+            <div style="display:flex; gap:4px;">
+                <button class="speed-btn" data-speed="0.25" onclick="setSpeed(0.25)">0.25x</button>
+                <button class="speed-btn" data-speed="0.5" onclick="setSpeed(0.5)">0.5x</button>
+                <button class="speed-btn speed-active" data-speed="1" onclick="setSpeed(1)">1x</button>
+                <button class="speed-btn" data-speed="2" onclick="setSpeed(2)">2x</button>
+            </div>
+            <!-- Raw mode toggle -->
+            <button id="btnRawMode" onclick="toggleRawMode()"
+                style="background:#21262d; border:1px solid #30363d; color:#c9d1d9; border-radius:6px;
+                       padding:4px 10px; cursor:pointer; font-size:0.8em; white-space:nowrap;"
+                title="Toggle between detection overlay and raw video">
+                &#128065; Detection
+            </button>
+        </div>
+
         <div class="legend">
             <div class="leg-item"><span class="leg-dot" style="background:#3fb950"></span> OK (barcode)</div>
             <div class="leg-item"><span class="leg-dot" style="background:#f85149"></span> NOK (no barcode)</div>
-            <div class="leg-item"><span class="leg-dot" style="background:#d29922"></span> DEFECTIVE (fallen)</div>
             <div class="leg-item"><span class="leg-dot" style="background:#58a6ff"></span> Decision locked</div>
             <div class="leg-item"><span class="leg-dot" style="background:#00c8ff"></span> Date detection</div>
         </div>
@@ -245,10 +414,7 @@
                     <div class="stat-value c-nok" id="nok">0</div>
                     <div class="stat-label">NOK &#10007;</div>
                 </div>
-                <div class="stat-card">
-                    <div class="stat-value c-def" id="def">0</div>
-                    <div class="stat-label">DEFECTIVE &#9888;</div>
-                </div>
+
             </div>
         </div>
 
@@ -278,6 +444,22 @@
 </div>
 
 <script>
+    /* ─── Toast system ─── */
+    function showToast(msg, type = 'info', duration = 3500) {
+        const container = document.getElementById('toast-container');
+        const t = document.createElement('div');
+        t.className = `toast toast-${type}`;
+        t.textContent = msg;
+        container.appendChild(t);
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => t.classList.add('show'));
+        });
+        setTimeout(() => {
+            t.classList.remove('show');
+            setTimeout(() => t.remove(), 350);
+        }, duration);
+    }
+
     /* ─── Exit line toggle ─── */
     let exitLineEnabled = true;
 
@@ -292,6 +474,59 @@
         } else {
             btn.textContent = '\u2501 Exit Line: OFF';
             btn.className = 'btn-exit-off';
+        }
+    }
+
+    async function rotateInput90() {
+        const r = await fetch('/api/rotate', { method: 'POST' });
+        const d = await r.json();
+        const deg = (d.rotation_deg || 0);
+        document.getElementById('btnRotate').textContent = '\u21b6 Rotate: ' + deg + '\u00b0';
+    }
+
+    let _exitLineSliderTimer = null;
+
+    function onExitLineSliderInput(val) {
+        // Update label immediately while dragging (no API call yet)
+        document.getElementById('exitLinePctLabel').textContent = val + '%';
+    }
+
+    function onExitLineSliderCommit(val) {
+        // Called on mouseup/touchend — send to server
+        document.getElementById('exitLinePctLabel').textContent = val + '%';
+        const isVert = document.getElementById('btnExitLineOrient').dataset.vertical === '1';
+        clearTimeout(_exitLineSliderTimer);
+        _exitLineSliderTimer = setTimeout(() => {
+            fetch('/api/exit_line_position', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ position: parseInt(val) }),
+            })
+            .then(r => r.json())
+            .then(d => showToast('Exit line → ' + val + '% from ' + (isVert ? 'left' : 'top'), 'info', 1500))
+            .catch(e => showToast('Error: ' + e, 'error'));
+        }, 50);
+    }
+
+    async function toggleExitLineOrientation() {
+        const r = await fetch('/api/exit_line_orientation', { method: 'POST' });
+        const d = await r.json();
+        _applyExitLineOrient(d.vertical);
+        showToast('Exit line → ' + d.orientation, 'info', 1500);
+    }
+
+    function _applyExitLineOrient(isVertical) {
+        const btn   = document.getElementById('btnExitLineOrient');
+        const label = document.getElementById('exitLineAxisLabel');
+        btn.dataset.vertical = isVertical ? '1' : '0';
+        if (isVertical) {
+            btn.innerHTML = '&#11021; Vertical';
+            btn.style.color = '#f0883e';
+            label.textContent = 'Exit Line \u2014 % from left';
+        } else {
+            btn.innerHTML = '&#11020; Horizontal';
+            btn.style.color = '#c9d1d9';
+            label.textContent = 'Exit Line \u2014 % from top';
         }
     }
 
@@ -403,43 +638,164 @@
         }
     }
 
-    /* ─── Start / stop ─── */
-    function startTracking() {
-        // If already running, stop first then restart
-        const doStart = () => {
-            fetch('/api/cameras').then(r => r.json()).then(d => {
-                const customSrc = document.getElementById('videoSource').value.trim();
-                let src = customSrc;
-                if (!src) {
-                    const cam = d.cameras.find(c => c.id === d.active_id);
-                    src = cam ? cam.source : '/dev/video0';
-                }
-                fetch('/api/start', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ source: src }),
-                }).then(r => r.json()).then(d => console.log(d))
-                  .catch(e => alert('Error: ' + e));
-            });
-        };
+    /* ─── Start / Pause / Resume ─── */
+    let _isPaused = false;
 
-        fetch('/api/stats').then(r => r.json()).then(d => {
-            if (d.is_running) {
-                // Auto-stop then start
-                fetch('/api/stop', { method: 'POST' })
-                    .then(r => r.json())
-                    .then(() => setTimeout(doStart, 300));
-            } else {
-                doStart();
+    function startTracking() {
+        fetch('/api/cameras').then(r => r.json()).then(camData => {
+            const customSrc = document.getElementById('videoSource').value.trim();
+            let src = customSrc;
+            if (!src) {
+                const cam = camData.cameras.find(c => c.id === camData.active_id);
+                src = cam ? cam.source : '/dev/video0';
             }
-        }).catch(() => doStart());
+            fetch('/api/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source: src }),
+            })
+            .then(r => r.json())
+            .then(d => {
+                if (d.error) {
+                    showToast('Start error: ' + d.error, 'error');
+                } else {
+                    showToast('\u25b6 Started: ' + String(src).split('/').pop(), 'success');
+                    _videoEndedNotified = false;
+                    _isPaused = false;
+                    _updatePauseBtn();
+                    const img = document.querySelector('.stream-container img');
+                    if (img) {
+                        img.src = '';
+                        setTimeout(() => { img.src = '/video_feed?t=' + Date.now(); }, 150);
+                    }
+                }
+            })
+            .catch(e => showToast('Error: ' + e, 'error'));
+        });
     }
 
     function stopTracking() {
         fetch('/api/stop', { method: 'POST' })
             .then(r => r.json())
-            .then(d => console.log(d));
+            .then(() => {
+                showToast('\u23f9 Stopped', 'info');
+                _isPaused = false;
+                _updatePauseBtn();
+            });
     }
+
+    async function togglePause() {
+        if (_isPaused) {
+            const r = await fetch('/api/resume', { method: 'POST' });
+            const d = await r.json();
+            if (!d.error) {
+                _isPaused = false;
+                showToast('\u25b6 Resumed', 'success', 1500);
+            }
+        } else {
+            const r = await fetch('/api/pause', { method: 'POST' });
+            const d = await r.json();
+            if (!d.error) {
+                _isPaused = true;
+                showToast('\u23f8 Paused', 'info', 1500);
+            }
+        }
+        _updatePauseBtn();
+    }
+
+    function _updatePauseBtn() {
+        const btn = document.getElementById('btnPause');
+        if (_isPaused) {
+            btn.innerHTML = '&#9654; Resume';
+            btn.className = 'btn-resume';
+        } else {
+            btn.innerHTML = '&#10074;&#10074; Pause';
+            btn.className = 'btn-stop';
+        }
+    }
+
+    /* ─── Timeline seek ─── */
+    let _timelineDragging = false;
+
+    function onTimelineInput(val) {
+        _timelineDragging = true;
+        const pct = (val / 10).toFixed(1);
+        // Preview time while dragging
+        const tl = document.getElementById('videoTimeLabel');
+        if (tl && tl.dataset.dur) {
+            const dur = parseFloat(tl.dataset.dur);
+            const pos = dur * pct / 100;
+            tl.textContent = _fmtTime(pos) + ' / ' + _fmtTime(dur);
+        }
+    }
+
+    function onTimelineCommit(val) {
+        _timelineDragging = false;
+        const pct = val / 10;  // slider 0-1000 → 0-100%
+        fetch('/api/seek', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ position: pct }),
+        })
+        .then(r => r.json())
+        .then(d => {
+            if (d.error) showToast(d.error, 'warn', 2000);
+        })
+        .catch(e => showToast('Seek error: ' + e, 'error'));
+    }
+
+    function _fmtTime(sec) {
+        if (!sec || sec < 0) return '0:00';
+        const m = Math.floor(sec / 60);
+        const s = Math.floor(sec % 60);
+        return m + ':' + (s < 10 ? '0' : '') + s;
+    }
+
+    /* ─── Playback speed ─── */
+    function setSpeed(speed) {
+        fetch('/api/speed', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ speed: speed }),
+        })
+        .then(r => r.json())
+        .then(d => {
+            _syncSpeedBtns(d.speed);
+            showToast('Speed: ' + d.speed + 'x', 'info', 1200);
+        })
+        .catch(e => showToast('Speed error: ' + e, 'error'));
+    }
+
+    function _syncSpeedBtns(activeSpeed) {
+        document.querySelectorAll('.speed-btn').forEach(btn => {
+            const s = parseFloat(btn.dataset.speed);
+            btn.classList.toggle('speed-active', Math.abs(s - activeSpeed) < 0.01);
+        });
+    }
+
+    /* ─── Raw mode toggle ─── */
+    async function toggleRawMode() {
+        const r = await fetch('/api/raw_mode', { method: 'POST' });
+        const d = await r.json();
+        _applyRawMode(d.raw_mode);
+        showToast(d.raw_mode ? 'Raw video (no detection)' : 'Detection overlay ON', 'info', 1500);
+    }
+
+    function _applyRawMode(isRaw) {
+        const btn = document.getElementById('btnRawMode');
+        if (isRaw) {
+            btn.innerHTML = '&#128065; Raw';
+            btn.style.color = '#f0883e';
+            btn.style.borderColor = '#f0883e';
+        } else {
+            btn.innerHTML = '&#128065; Detection';
+            btn.style.color = '#c9d1d9';
+            btn.style.borderColor = '#30363d';
+        }
+    }
+
+    /* ─── Track video_ended transitions ─── */
+    let _videoEndedNotified = false;
 
     /* ─── Poll stats ─── */
     function updateStats() {
@@ -447,7 +803,6 @@
             document.getElementById('total').textContent = d.total_packets;
             document.getElementById('ok').textContent    = d.packages_ok;
             document.getElementById('nok').textContent   = d.packages_nok;
-            document.getElementById('def').textContent   = d.packages_defective;
             document.getElementById('vfps').textContent  = d.video_fps  || 0;
             document.getElementById('dfps').textContent  = d.det_fps    || 0;
             document.getElementById('ms').textContent    = d.inference_ms || 0;
@@ -467,13 +822,81 @@
                 btn.className   = exitLineEnabled ? 'btn-exit-on'      : 'btn-exit-off';
             }
 
+            // Sync exit line slider with server (only when not actively dragging)
+            if (typeof d.exit_line_pct !== 'undefined' && document.activeElement !== document.getElementById('exitLineSlider')) {
+                const slider = document.getElementById('exitLineSlider');
+                const label  = document.getElementById('exitLinePctLabel');
+                if (slider && parseInt(slider.value) !== d.exit_line_pct) {
+                    slider.value = d.exit_line_pct;
+                    label.textContent = d.exit_line_pct + '%';
+                }
+            }
+            // Sync exit line orientation button
+            if (typeof d.exit_line_vertical !== 'undefined') {
+                const btn = document.getElementById('btnExitLineOrient');
+                const currentV = btn && btn.dataset.vertical === '1';
+                if (btn && currentV !== d.exit_line_vertical) {
+                    _applyExitLineOrient(d.exit_line_vertical);
+                }
+            }
+
+            if (typeof d.rotation_deg !== 'undefined') {
+                document.getElementById('btnRotate').textContent = '\u21b6 Rotate: ' + d.rotation_deg + '\u00b0';
+            }
+
+            // ── Sync pause button ──
+            const btn_p = document.getElementById('btnPause');
+            if (d.is_running) {
+                btn_p.disabled = false;
+                if (d.paused !== _isPaused) {
+                    _isPaused = d.paused;
+                    _updatePauseBtn();
+                }
+            } else {
+                btn_p.disabled = true;
+                if (_isPaused) { _isPaused = false; _updatePauseBtn(); }
+            }
+
+            // ── Sync video controls bar (show for video files) ──
+            const vcb = document.getElementById('videoControlsBar');
+            if (d.is_video_file && d.is_running) {
+                vcb.style.display = 'flex';
+                // Update timeline (only when not dragging)
+                if (!_timelineDragging) {
+                    const tl = document.getElementById('videoTimeline');
+                    const tlbl = document.getElementById('videoTimeLabel');
+                    const total = d.video_total_frames || 1;
+                    const pct = (d.video_pos_frames / total) * 1000;
+                    tl.value = Math.round(pct);
+                    const posSec = d.video_pos_sec || 0;
+                    const durSec = d.video_duration_sec || 0;
+                    tlbl.textContent = _fmtTime(posSec) + ' / ' + _fmtTime(durSec);
+                    tlbl.dataset.dur = durSec;
+                }
+                // Sync speed buttons
+                if (typeof d.playback_speed !== 'undefined') {
+                    _syncSpeedBtns(d.playback_speed);
+                }
+                // Sync raw mode button
+                if (typeof d.raw_mode !== 'undefined') {
+                    _applyRawMode(d.raw_mode);
+                }
+            } else if (!d.is_video_file) {
+                vcb.style.display = 'none';
+            }
+
             // Status dot
             const dot = document.getElementById('statusDot');
             const txt = document.getElementById('statusText');
             if (d.video_ended) {
-                dot.className = 'status-dot ended'; txt.textContent = 'Video ended';
+                dot.className = 'status-dot ended'; txt.textContent = 'Video ended — press Start to replay';
+                if (!_videoEndedNotified) {
+                    _videoEndedNotified = true;
+                    showToast('⏹ Video ended — press Start to replay', 'warn', 5000);
+                }
             } else if (d.is_running) {
                 dot.className = 'status-dot running'; txt.textContent = 'Processing…';
+                _videoEndedNotified = false;
             } else {
                 dot.className = 'status-dot'; txt.textContent = 'Idle';
             }
@@ -494,6 +917,76 @@
                 box.textContent = '(empty)';
             }
         });
+    }
+
+    /* ─── Thresholds modal ─── */
+    async function openThreshModal() {
+        // Load current values from server before opening
+        try {
+            const r = await fetch('/api/config');
+            const d = await r.json();
+            const cfg = d.config || {};
+            const tc  = d.tracker_config || {};
+            document.getElementById('cfg_conf_paquet').value        = cfg.conf_paquet        ?? '';
+            document.getElementById('cfg_conf_barcode').value       = cfg.conf_barcode       ?? '';
+            document.getElementById('cfg_conf_date').value          = cfg.conf_date          ?? '';
+            document.getElementById('cfg_imgsz').value              = cfg.imgsz              ?? '';
+            document.getElementById('cfg_track_high_thresh').value  = tc.track_high_thresh   ?? '';
+            document.getElementById('cfg_track_low_thresh').value   = tc.track_low_thresh    ?? '';
+            document.getElementById('cfg_new_track_thresh').value   = tc.new_track_thresh    ?? '';
+            document.getElementById('cfg_match_thresh').value       = tc.match_thresh        ?? '';
+            document.getElementById('cfg_track_buffer').value       = tc.track_buffer        ?? '';
+        } catch(e) {
+            showToast('Could not load config: ' + e, 'error');
+        }
+        document.getElementById('threshModal').classList.add('open');
+    }
+
+    function closeThreshModal() {
+        document.getElementById('threshModal').classList.remove('open');
+    }
+
+    function _threshModalBgClick(e) {
+        if (e.target === document.getElementById('threshModal')) closeThreshModal();
+    }
+
+    async function applyThresholds() {
+        const get = id => {
+            const v = document.getElementById(id).value;
+            return v === '' ? undefined : parseFloat(v);
+        };
+        const getInt = id => {
+            const v = document.getElementById(id).value;
+            return v === '' ? undefined : parseInt(v);
+        };
+        const payload = {};
+        const addIfDefined = (key, val) => { if (val !== undefined && !isNaN(val)) payload[key] = val; };
+        addIfDefined('conf_paquet',        get('cfg_conf_paquet'));
+        addIfDefined('conf_barcode',       get('cfg_conf_barcode'));
+        addIfDefined('conf_date',          get('cfg_conf_date'));
+        addIfDefined('imgsz',              getInt('cfg_imgsz'));
+        addIfDefined('track_high_thresh',  get('cfg_track_high_thresh'));
+        addIfDefined('track_low_thresh',   get('cfg_track_low_thresh'));
+        addIfDefined('new_track_thresh',   get('cfg_new_track_thresh'));
+        addIfDefined('match_thresh',       get('cfg_match_thresh'));
+        addIfDefined('track_buffer',       getInt('cfg_track_buffer'));
+
+        try {
+            const r = await fetch('/api/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const d = await r.json();
+            if (d.error) {
+                showToast('Apply failed: ' + d.error, 'error');
+            } else {
+                showToast('\u2713 Thresholds applied', 'success', 2500);
+                closeThreshModal();
+            }
+        } catch(e) {
+            showToast('Apply error: ' + e, 'error');
+        }
     }
 
     /* ─── Init ─── */
