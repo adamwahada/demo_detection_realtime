@@ -353,6 +353,12 @@
                        padding:4px 10px; cursor:pointer; font-size:0.8em; white-space:nowrap;">
                 &#11020; Horizontal
             </button>
+            <button id="btnExitLineInvert" onclick="toggleExitLineInvert()"
+                title="Flip direction: measure % from opposite edge (use when conveyor moves in reverse direction)"
+                style="background:#21262d; border:1px solid #30363d; color:#8b949e; border-radius:6px;
+                       padding:4px 10px; cursor:pointer; font-size:0.8em; white-space:nowrap;">
+                &#8646; Normal
+            </button>
         </div>
 
         <div class="stream-container">
@@ -494,7 +500,8 @@
     function onExitLineSliderCommit(val) {
         // Called on mouseup/touchend — send to server
         document.getElementById('exitLinePctLabel').textContent = val + '%';
-        const isVert = document.getElementById('btnExitLineOrient').dataset.vertical === '1';
+        const isVert     = document.getElementById('btnExitLineOrient').dataset.vertical === '1';
+        const isInverted = document.getElementById('btnExitLineInvert').dataset.inverted === '1';
         clearTimeout(_exitLineSliderTimer);
         _exitLineSliderTimer = setTimeout(() => {
             fetch('/api/exit_line_position', {
@@ -503,7 +510,12 @@
                 body: JSON.stringify({ position: parseInt(val) }),
             })
             .then(r => r.json())
-            .then(d => showToast('Exit line → ' + val + '% from ' + (isVert ? 'left' : 'top'), 'info', 1500))
+            .then(d => {
+                let dir;
+                if (isVert)  dir = isInverted ? 'right' : 'left';
+                else         dir = isInverted ? 'bottom' : 'top';
+                showToast('Exit line → ' + val + '% from ' + dir, 'info', 1500);
+            })
             .catch(e => showToast('Error: ' + e, 'error'));
         }, 50);
     }
@@ -512,21 +524,54 @@
         const r = await fetch('/api/exit_line_orientation', { method: 'POST' });
         const d = await r.json();
         _applyExitLineOrient(d.vertical);
+        _updateAxisLabel();
         showToast('Exit line → ' + d.orientation, 'info', 1500);
     }
 
+    async function toggleExitLineInvert() {
+        const r = await fetch('/api/exit_line_invert', { method: 'POST' });
+        const d = await r.json();
+        _applyExitLineInvert(d.inverted);
+        _updateAxisLabel();
+        const msg = d.inverted ? 'Direction flipped (% from far edge)' : 'Direction normal (% from near edge)';
+        showToast(msg, 'info', 2000);
+    }
+
     function _applyExitLineOrient(isVertical) {
-        const btn   = document.getElementById('btnExitLineOrient');
-        const label = document.getElementById('exitLineAxisLabel');
+        const btn = document.getElementById('btnExitLineOrient');
         btn.dataset.vertical = isVertical ? '1' : '0';
         if (isVertical) {
             btn.innerHTML = '&#11021; Vertical';
             btn.style.color = '#f0883e';
-            label.textContent = 'Exit Line \u2014 % from left';
         } else {
             btn.innerHTML = '&#11020; Horizontal';
             btn.style.color = '#c9d1d9';
-            label.textContent = 'Exit Line \u2014 % from top';
+        }
+    }
+
+    function _applyExitLineInvert(isInverted) {
+        const btn = document.getElementById('btnExitLineInvert');
+        btn.dataset.inverted = isInverted ? '1' : '0';
+        if (isInverted) {
+            btn.innerHTML = '&#8646; Flipped';
+            btn.style.color = '#f0883e';
+            btn.style.borderColor = '#f0883e';
+        } else {
+            btn.innerHTML = '&#8646; Normal';
+            btn.style.color = '#8b949e';
+            btn.style.borderColor = '#30363d';
+        }
+    }
+
+    function _updateAxisLabel() {
+        const isVert     = document.getElementById('btnExitLineOrient').dataset.vertical === '1';
+        const isInverted = document.getElementById('btnExitLineInvert').dataset.inverted === '0' ? false
+                         : (document.getElementById('btnExitLineInvert').dataset.inverted === '1');
+        const label = document.getElementById('exitLineAxisLabel');
+        if (isVert) {
+            label.textContent = 'Exit Line \u2014 % from ' + (isInverted ? 'right' : 'left');
+        } else {
+            label.textContent = 'Exit Line \u2014 % from ' + (isInverted ? 'bottom' : 'top');
         }
     }
 
@@ -839,6 +884,15 @@
                     _applyExitLineOrient(d.exit_line_vertical);
                 }
             }
+            // Sync exit line invert button
+            if (typeof d.exit_line_inverted !== 'undefined') {
+                const btn = document.getElementById('btnExitLineInvert');
+                const currentI = btn && btn.dataset.inverted === '1';
+                if (btn && currentI !== d.exit_line_inverted) {
+                    _applyExitLineInvert(d.exit_line_inverted);
+                }
+            }
+            _updateAxisLabel();
 
             if (typeof d.rotation_deg !== 'undefined') {
                 document.getElementById('btnRotate').textContent = '\u21b6 Rotate: ' + d.rotation_deg + '\u00b0';

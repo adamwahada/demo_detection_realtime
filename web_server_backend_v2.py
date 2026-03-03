@@ -204,6 +204,7 @@ def api_stats():
     s["camera_id"]        = current_camera_id
     s["exit_line_enabled"] = state._exit_line_enabled
     s["exit_line_vertical"] = state._exit_line_vertical
+    s["exit_line_inverted"] = state._exit_line_inverted
     s["rotation_deg"] = (state._rotation_steps % 4) * 90
     # Current exit line as % from leading edge (for slider sync)
     s["exit_line_pct"] = state._exit_line_pct
@@ -269,6 +270,19 @@ def api_exit_line_orientation():
     orientation = "vertical" if state._exit_line_vertical else "horizontal"
     print(f'[EXIT LINE] Orientation set to {orientation}')
     return jsonify({"vertical": state._exit_line_vertical, "orientation": orientation})
+
+
+@app.route('/api/exit_line_invert', methods=['POST'])
+def api_exit_line_invert():
+    """Toggle direction: % measured from near edge (False) or far edge (True).
+    Use this when the conveyor moves in the opposite direction so that the
+    slider value makes intuitive sense (e.g. 85% from the right instead of left).
+    """
+    state._exit_line_inverted = not state._exit_line_inverted
+    state._recompute_exit_line_y()
+    inv = state._exit_line_inverted
+    print(f'[EXIT LINE] Direction inverted={inv}')
+    return jsonify({"inverted": inv})
 
 
 @app.route('/api/exit_line_position', methods=['POST'])

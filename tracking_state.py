@@ -98,6 +98,9 @@ class TrackingState:
         self._exit_line_pct = 85
         # ── Exit line orientation: False = horizontal (y), True = vertical (x) ──
         self._exit_line_vertical = False
+        # ── Exit line direction inverted: % measured from opposite edge ──
+        # e.g. 85% normally = 85% from top; inverted = 85% from bottom (= 15% from top)
+        self._exit_line_inverted = False
         # ── Exit line enabled flag (can be toggled via API, survives sessions) ──
         self._exit_line_enabled = True
         # ── Frame rotation steps (0,1,2,3 => 0°,90°,180°,270° CCW; survives sessions) ──
@@ -220,6 +223,8 @@ class TrackingState:
         _exit_line_vertical = False → horizontal line, ref = displayed height.
         _exit_line_vertical = True  → vertical line,   ref = displayed width.
         After rotation 90°/270° the frame is transposed so height↔width swap.
+        _exit_line_inverted = True  → % measured from the far edge instead of near edge
+                                      (i.e. pixel = ref * (100 - pct) / 100).
         """
         steps = self._rotation_steps % 4
         transposed = steps in (1, 3)
@@ -228,7 +233,8 @@ class TrackingState:
         else:
             ref = self._frame_width if transposed else self._frame_height
         if ref > 0:
-            self._exit_line_y = int(ref * self._exit_line_pct / 100)
+            effective_pct = (100 - self._exit_line_pct) if self._exit_line_inverted else self._exit_line_pct
+            self._exit_line_y = int(ref * effective_pct / 100)
 
     # ═══════════════════════════════════════════
     # PUBLIC API
@@ -425,6 +431,27 @@ class TrackingState:
         self.date_id = next((k for k, v in names.items() if v == date_cls), None) if date_cls else None
         self.mode = checkpoint.get("mode", "tracking")
         self.current_checkpoint = checkpoint
+
+        # Ensure each checkpoint has explicit per-class thresholds so
+        # switching to a model that doesn't specify them won't break
+        # detection. Prefer values defined on the checkpoint, then fall
+        # back to global `CONFIG` entries. If those are absent, use
+        # conservative numeric fallbacks.
+        try:
+            from tracking_config import CONFIG as _GLOBAL_CONFIG
+        except Exception:
+            _GLOBAL_CONFIG = {}
+
+        missing = []
+        for k, fallback in (('conf_paquet', 0.45), ('conf_barcode', 0.45), ('conf_date', 0.30)):
+            if k not in self.current_checkpoint or self.current_checkpoint.get(k) is None:
+                if k in _GLOBAL_CONFIG:
+                    self.current_checkpoint[k] = _GLOBAL_CONFIG[k]
+                else:
+                    self.current_checkpoint[k] = fallback
+                missing.append(k)
+        if missing:
+            print(f"[SWITCH] Populated missing thresholds for checkpoint: {', '.join(missing)}")
 
         print(f"[SWITCH] Loaded | mode={self.mode} | "
               f"package_id={self.package_id} barcode_id={self.barcode_id} date_id={self.date_id}")
@@ -704,10 +731,22 @@ class TrackingState:
 
                 # ── YOLO Inference ──
                 try:
+                    # Build list of per-class thresholds from the active
+                    # checkpoint (populated during `switch_checkpoint`).
+                    # Use ALL thresholds regardless of which class IDs are
+                    # resolved, so even checkpoints where class names are
+                    # None (e.g. "date" mode) still get a sane conf floor.
+                    cp = self.current_checkpoint or {}
+                    conf_list = [
+                        v for k in ("conf_paquet", "conf_barcode", "conf_date")
+                        if (v := cp.get(k)) is not None
+                    ]
+                    conf_min = min(conf_list) if conf_list else CONFIG.get("conf_date", 0.25)
+
                     if self.mode == "tracking":
                         results = self.model.track(
                             frame,
-                            conf=min(CONFIG["conf_paquet"], CONFIG["conf_barcode"]),
+                            conf=conf_min,
                             imgsz=CONFIG["imgsz"],
                             verbose=False,
                             persist=True,
@@ -716,7 +755,7 @@ class TrackingState:
                     else:
                         results = self.model(
                             frame,
-                            conf=min(CONFIG["conf_paquet"], CONFIG["conf_barcode"]),
+                            conf=conf_min,
                             imgsz=CONFIG["imgsz"],
                             verbose=False
                         )[0]
@@ -769,13 +808,13 @@ class TrackingState:
                         cls = int(b.cls)
                         conf = float(b.conf)
                         x1, y1, x2, y2 = b.xyxy[0].cpu().numpy()
-                        if self.package_id is not None and cls == self.package_id and conf >= CONFIG["conf_paquet"]:
+                        if self.package_id is not None and cls == self.package_id and conf >= self.current_checkpoint.get("conf_paquet", CONFIG.get("conf_paquet")):
                             tid = int(box_ids[i]) if box_ids is not None else -1
                             if tid >= 0:
                                 tracks.append([int(x1), int(y1), int(x2), int(y2), tid])
-                        elif self.barcode_id is not None and cls == self.barcode_id and conf >= CONFIG["conf_barcode"]:
+                        elif self.barcode_id is not None and cls == self.barcode_id and conf >= self.current_checkpoint.get("conf_barcode", CONFIG.get("conf_barcode")):
                             barcode_dets.append([x1, y1, x2, y2, conf])
-                        elif self.date_id is not None and cls == self.date_id and conf >= CONFIG.get("conf_date", 0.45):
+                        elif self.date_id is not None and cls == self.date_id and conf >= self.current_checkpoint.get("conf_date", CONFIG.get("conf_date")):
                             date_dets.append([int(x1), int(y1), int(x2), int(y2), conf])
 
                 # ── Per-track processing ──
@@ -801,6 +840,7 @@ class TrackingState:
                             "prev_area": None,
                             "frames_tracked": 0,
                             "first_frame": frame_idx,
+                            "pre_line_seen": False,
                         }
 
                     pkg = self.packages[tid]
@@ -842,13 +882,41 @@ class TrackingState:
                 if self._exit_line_enabled:
                     current_exit = self._exit_line_y
                     line_is_vert = self._exit_line_vertical
+                    exit_pct = self._exit_line_pct  # e.g. 85 → line in the far portion
                     for t in tracks:
                         x1, y1, x2, y2, tid = map(int, t[:5])
                         if tid not in self.packages:
                             continue
                         pkg = self.packages[tid]
-                        crossed_check = (x2 >= current_exit) if line_is_vert else (y2 >= current_exit)
-                        if crossed_check and tid not in self.packets_crossed_line:
+
+                        # ── Track whether the packet has been seen on the near side ──
+                        # "near side" = the side from which the packet approaches.
+                        # Not inverted (effective_pct > 50): line is in the far half,
+                        #   packets travel toward larger coords → leading edge = x1/y1 (min).
+                        #   pre_line_seen once x1/y1 < exit (still approaching).
+                        #   crossed once x2/y2 >= exit (max edge clears the line).
+                        # Inverted (effective_pct <= 50): line is in the near half,
+                        #   packets travel toward smaller coords (e.g. right→left) →
+                        #   leading edge = x1/y1 (min coord = front of travel).
+                        #   pre_line_seen once x1/y1 > exit (still on approach side).
+                        #   crossed once x1/y1 <= exit (front edge clears the line).
+                        if not pkg["pre_line_seen"]:
+                            effective_pct = (100 - exit_pct) if self._exit_line_inverted else exit_pct
+                            if line_is_vert:
+                                near_check = (x1 < current_exit) if effective_pct > 50 else (x1 > current_exit)
+                            else:
+                                near_check = (y1 < current_exit) if effective_pct > 50 else (y1 > current_exit)
+                            if near_check:
+                                pkg["pre_line_seen"] = True
+
+                        # ── Crossing: leading edge past the line AND was on near side ──
+                        # Inverted → travel is high→low; leading edge is x1/y1 (min coord).
+                        # Normal  → travel is low→high; leading edge is x2/y2 (max coord).
+                        if self._exit_line_inverted:
+                            crossed_check = (x1 <= current_exit) if line_is_vert else (y1 <= current_exit)
+                        else:
+                            crossed_check = (x2 >= current_exit) if line_is_vert else (y2 >= current_exit)
+                        if crossed_check and pkg["pre_line_seen"] and tid not in self.packets_crossed_line:
                             if pkg["decision_locked"]:
                                 self.packets_crossed_line.add(tid)
                                 continue

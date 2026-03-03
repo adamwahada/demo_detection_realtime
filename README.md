@@ -1,11 +1,11 @@
 # Real-Time Package Tracking & Barcode Detection
 
-A parallel-architecture web server that performs real-time **package tracking** and **barcode detection** using YOLO + ByteTrack. The video stream stays smooth regardless of YOLO inference speed.
+A parallel-architecture web server that performs real-time **package tracking** and **barcode detection**  and **date detection** using YOLO + ByteTrack. The video stream stays smooth regardless of YOLO inference speed.
 
 ## Architecture
 
 ```
-Thread 1 — Reader      : reads video at native FPS (always smooth)
+Thread 1 — Reader      : reads video at native FPS (to ensure it's always smooth)
 Thread 2 — Detector    : runs YOLO + ByteTrack in parallel (updates stats & overlays)
 Thread 3 — Compositor  : composites raw frame + detection overlay, encodes JPEG
 Web Feed               : serves pre-encoded JPEG via MJPEG (zero computation)
@@ -66,8 +66,7 @@ bestexp2.pt                ← YOLO model weights (not in repo — see Setup)
 
 4. **Add the model weights:**
    
-   Place `bestexp2.pt` in the project root. This file is **not tracked by git** (too large). Get it from the shared drive or ask the team lead.
-
+   Place `bestexp2.pt` in the project root this chekpoint is for pacekts tracking and barcode detetcion the `yolo26-BB(date).pt` is the one for dates detecion and `yolo26m_BB_barcode_date.pt`is the one featuring dates and barcode and packet tracking 
 ## Running
 
 ```bash
@@ -82,7 +81,6 @@ http://localhost:5000
 Enter a video source in the UI and click **Start**:
 - USB camera: `/dev/video0`
 - Video file: `/path/to/video.mp4`
-- RTSP stream: `rtsp://user:pass@ip:port/stream`
 
 ## Configuration
 
@@ -101,11 +99,6 @@ All parameters are in **`tracking_config.py`**:
 | `JPEG_QUALITY` | 80 | MJPEG stream quality |
 
 You can also update config at runtime via the API:
-```bash
-curl -X POST http://localhost:5000/api/config \
-  -H "Content-Type: application/json" \
-  -d '{"conf_paquet": 0.6}'
-```
 
 ## API Endpoints
 
@@ -124,4 +117,3 @@ curl -X POST http://localhost:5000/api/config \
 - **"Failed to fetch" in browser** — The server crashed. Check terminal for errors. Common cause: segfault from GPU memory (exit code 139).
 - **Low YOLO FPS** — Increase `DETECTOR_FRAME_SKIP` or reduce `imgsz` in `tracking_config.py`.
 - **Camera not opening** — Check `/dev/video0` exists (`ls /dev/video*`). Try a different index.
-- **RTSP lag** — The reader forces TCP transport. If still laggy, check network bandwidth.

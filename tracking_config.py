@@ -25,7 +25,7 @@ CHECKPOINTS = [
         "mode":          "date",
         "package_class": None,   
         "barcode_class": None,
-        "date_class":    None,
+        "date_class":    "date",
     },
     {
         "id":            "barcode_date",
