@@ -52,6 +52,12 @@ class TrackingState:
         self.barcode_id = None
         self.date_id = None
 
+        # Secondary date-detection model (loaded when checkpoint has
+        # "secondary_date_model_path"). Runs in parallel for best accuracy.
+        self.secondary_model = None
+        self._secondary_date_id = None
+        self._use_secondary_date = False  # True when secondary model is active
+
         # Active checkpoint info (set by switch_checkpoint / init_models)
         self.mode = "tracking"          # "tracking" or "date"
         self.current_checkpoint = None  # the checkpoint dict from CHECKPOINTS
@@ -82,6 +88,7 @@ class TrackingState:
 
         # ── Detection overlay data ──
         self._overlay = self._empty_overlay()
+        self._overlay_frame = None   # frame that was used for this overlay (video sync)
         self._overlay_lock = threading.Lock()
 
         # ── Pre-encoded JPEG bytes (produced by compositor thread) ──
@@ -389,18 +396,24 @@ class TrackingState:
             print(f"[SWITCH] Stopping current processing...")
             self.stop_processing()
 
-        # 2. Unload model from VRAM
+        # 2. Unload models from VRAM
         if self.model is not None:
-            print(f"[SWITCH] Unloading model from VRAM...")
+            print(f"[SWITCH] Unloading primary model from VRAM...")
             del self.model
             self.model = None
-            try:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass
-            gc.collect()
-            print(f"[SWITCH] VRAM freed.")
+        if self.secondary_model is not None:
+            print(f"[SWITCH] Unloading secondary date model from VRAM...")
+            del self.secondary_model
+            self.secondary_model = None
+            self._secondary_date_id = None
+            self._use_secondary_date = False
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        gc.collect()
+        print(f"[SWITCH] VRAM freed.")
 
         # 3. Load new model
         print(f"[SWITCH] Loading checkpoint: {checkpoint['label']} ({checkpoint['path']})")
@@ -455,6 +468,41 @@ class TrackingState:
 
         print(f"[SWITCH] Loaded | mode={self.mode} | "
               f"package_id={self.package_id} barcode_id={self.barcode_id} date_id={self.date_id}")
+
+        # 4a. Load secondary date model if configured
+        sec_path = checkpoint.get("secondary_date_model_path")
+        sec_cls  = checkpoint.get("secondary_date_class")
+        if sec_path and self.mode == "tracking":
+            print(f"[SWITCH] Loading secondary date model: {sec_path}")
+            self.secondary_model = YOLO(sec_path)
+            try:
+                self.secondary_model.to(DEVICE)
+            except Exception:
+                pass
+            try:
+                if str(DEVICE).lower().startswith("cuda") and torch.cuda.is_available():
+                    getattr(self.secondary_model, "model", None).half()
+                    print("[SWITCH] Secondary model converted to FP16.")
+            except Exception:
+                pass
+            sec_names = self.secondary_model.names
+            self._secondary_date_id = next(
+                (k for k, v in sec_names.items() if v == sec_cls), None
+            ) if sec_cls else None
+            self._use_secondary_date = self._secondary_date_id is not None
+            # Warmup secondary model
+            try:
+                dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+                self.secondary_model(dummy, imgsz=CONFIG["imgsz"], verbose=False)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                print(f"[SWITCH] Secondary model warmup done | date_id={self._secondary_date_id}")
+            except Exception as e:
+                print(f"[SWITCH] Secondary warmup failed (non-fatal): {e}")
+        else:
+            self.secondary_model = None
+            self._secondary_date_id = None
+            self._use_secondary_date = False
 
         # 4b. Apply default rotation for this checkpoint
         default_rot = checkpoint.get("default_rotation", 0)
@@ -790,6 +838,7 @@ class TrackingState:
                             'det_ms':        det_ms,
                             'frame_idx':     frame_idx,
                         }
+                        self._overlay_frame = frame
                     with self._stats_lock:
                         self.stats.update({
                             "det_fps":       round(det_fps, 1),
@@ -817,6 +866,46 @@ class TrackingState:
                         elif self.date_id is not None and cls == self.date_id and conf >= self.current_checkpoint.get("conf_date", CONFIG.get("conf_date")):
                             date_dets.append([int(x1), int(y1), int(x2), int(y2), conf])
 
+                # ── Secondary date model inference (if active) ──
+                secondary_date_dets = []
+                if self._use_secondary_date and self.secondary_model is not None:
+                    try:
+                        sec_conf = self.current_checkpoint.get("conf_date", CONFIG.get("conf_date", 0.30))
+                        sec_results = self.secondary_model(
+                            frame,
+                            conf=sec_conf,
+                            imgsz=CONFIG["imgsz"],
+                            verbose=False
+                        )[0]
+                        if sec_results.boxes is not None:
+                            for b in sec_results.boxes:
+                                cls = int(b.cls)
+                                conf_val = float(b.conf)
+                                if cls == self._secondary_date_id:
+                                    sx1, sy1, sx2, sy2 = b.xyxy[0].cpu().numpy()
+                                    secondary_date_dets.append([int(sx1), int(sy1), int(sx2), int(sy2), conf_val])
+                    except Exception as sec_err:
+                        print(f"[DETECTOR] Secondary date model error: {sec_err}")
+
+                # Merge both sources then deduplicate via IoU (NMS-like)
+                # so the same physical date label doesn't appear twice on screen.
+                _merged = date_dets + secondary_date_dets
+                all_date_dets = []
+                for cand in sorted(_merged, key=lambda d: d[4], reverse=True):
+                    cx1, cy1, cx2, cy2 = cand[0], cand[1], cand[2], cand[3]
+                    duplicate = False
+                    for kept in all_date_dets:
+                        kx1, ky1, kx2, ky2 = kept[0], kept[1], kept[2], kept[3]
+                        ix1, iy1 = max(cx1, kx1), max(cy1, ky1)
+                        ix2, iy2 = min(cx2, kx2), min(cy2, ky2)
+                        inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+                        union = (cx2 - cx1) * (cy2 - cy1) + (kx2 - kx1) * (ky2 - ky1) - inter
+                        if union > 0 and inter / union > 0.4:
+                            duplicate = True
+                            break
+                    if not duplicate:
+                        all_date_dets.append(cand)
+
                 # ── Per-track processing ──
                 track_boxes = []
 
@@ -825,15 +914,21 @@ class TrackingState:
 
                     if tid not in self.packages:
                         inherited_barcode = False
+                        inherited_date = False
                         new_bbox = (x1, y1, x2, y2)
                         for etid, epkg in self.packages.items():
-                            if epkg.get("barcode_detected") and epkg.get("prev_bbox"):
-                                if self._compute_iou(new_bbox, epkg["prev_bbox"]) > 0.3:
+                            if epkg.get("prev_bbox") and self._compute_iou(new_bbox, epkg["prev_bbox"]) > 0.3:
+                                if epkg.get("barcode_detected") and not inherited_barcode:
                                     inherited_barcode = True
                                     print(f"[DET] Track {tid} inherited barcode from Track {etid} (IoU match)")
+                                if epkg.get("date_detected") and not inherited_date:
+                                    inherited_date = True
+                                    print(f"[DET] Track {tid} inherited date from Track {etid} (IoU match)")
+                                if inherited_barcode and inherited_date:
                                     break
                         self.packages[tid] = {
                             "barcode_detected": inherited_barcode,
+                            "date_detected": inherited_date,
                             "decision_locked": False,
                             "final_decision": None,
                             "prev_bbox": None,
@@ -860,16 +955,46 @@ class TrackingState:
                                 print(f"[DET] Barcode on Track {tid} conf={bc:.3f}")
                                 break
 
+                    # ── Date association (from primary + secondary model) ──
+                    if not pkg.get("date_detected"):
+                        for dx1, dy1, dx2, dy2, dc in all_date_dets:
+                            cx, cy = (dx1 + dx2) / 2, (dy1 + dy2) / 2
+                            if x1 <= cx <= x2 and y1 <= cy <= y2:
+                                pkg["date_detected"] = True
+                                src = "secondary" if [dx1, dy1, dx2, dy2, dc] in secondary_date_dets else "primary"
+                                print(f"[DET] Date on Track {tid} conf={dc:.3f} (from {src} model)")
+                                break
+
                     # ── Visualization ──
+                    # Determine OK/NOK based on which validations are required.
+                    # When secondary date model is active: need BOTH barcode AND date.
+                    # Otherwise: only barcode is required (original behaviour).
                     if pkg["decision_locked"]:
                         color = (255, 165, 0)
                         status = pkg["final_decision"]
-                    elif pkg["barcode_detected"]:
-                        color = (0, 255, 0)
-                        status = "OK"
                     else:
-                        color = (0, 0, 255)
-                        status = "NOK"
+                        has_barcode = pkg["barcode_detected"]
+                        has_date = pkg.get("date_detected", False)
+                        if self._use_secondary_date:
+                            # Dual validation: barcode + date
+                            if has_barcode and has_date:
+                                color = (0, 255, 0)    # green = both found
+                                status = "OK"
+                            elif has_barcode or has_date:
+                                color = (0, 165, 255)  # orange = partial
+                                what = "BC" if has_barcode else "DT"
+                                status = f"NOK({what})"
+                            else:
+                                color = (0, 0, 255)    # red = nothing
+                                status = "NOK"
+                        else:
+                            # Original: barcode only
+                            if has_barcode:
+                                color = (0, 255, 0)
+                                status = "OK"
+                            else:
+                                color = (0, 0, 255)
+                                status = "NOK"
 
                     if tid in self.packet_numbers:
                         lbl = f"#{self.packet_numbers[tid]} {status}"
@@ -923,11 +1048,23 @@ class TrackingState:
                             self.packets_crossed_line.add(tid)
                             self.total_packets += 1
                             self.packet_numbers[tid] = self.total_packets
-                            final = "OK" if pkg["barcode_detected"] else "NOK"
+                            has_bc = pkg["barcode_detected"]
+                            has_dt = pkg.get("date_detected", False)
+                            if self._use_secondary_date:
+                                # Dual validation
+                                final = "OK" if (has_bc and has_dt) else "NOK"
+                                reasons = []
+                                if has_bc: reasons.append("BARCODE")
+                                else: reasons.append("NO BARCODE")
+                                if has_dt: reasons.append("DATE")
+                                else: reasons.append("NO DATE")
+                                reason = " + ".join(reasons)
+                            else:
+                                final = "OK" if has_bc else "NOK"
+                                reason = "BARCODE" if has_bc else "NO BARCODE"
                             pkg["decision_locked"] = True
                             pkg["final_decision"] = final
                             self.output_fifo.append(final)
-                            reason = "BARCODE" if pkg["barcode_detected"] else "NO BARCODE"
                             print(f"[DET] Packet #{self.total_packets} -> {final} ({reason})")
 
                 # ── Detection timing ──
@@ -945,7 +1082,7 @@ class TrackingState:
                                for bx1, by1, bx2, by2, bc in barcode_dets]
 
                 date_vis = [(dx1, dy1, dx2, dy2, dc)
-                            for dx1, dy1, dx2, dy2, dc in date_dets]
+                            for dx1, dy1, dx2, dy2, dc in all_date_dets]
 
                 with self._overlay_lock:
                     self._overlay = {
@@ -959,6 +1096,7 @@ class TrackingState:
                         'det_ms': det_ms,
                         'frame_idx': frame_idx,
                     }
+                    self._overlay_frame = frame
 
                 ok = self.output_fifo.count("OK")
                 nok = self.output_fifo.count("NOK")
@@ -1002,12 +1140,26 @@ class TrackingState:
                 if got:
                     self._raw_changed.clear()
 
-                with self._raw_lock:
-                    raw = self._raw_frame
-                if raw is None:
-                    continue
-
-                frame = raw.copy()
+                # For video files use the frame that was actually detected on
+                # so bounding boxes align exactly with the pixels they describe.
+                # For live cameras keep using the freshest raw frame.
+                if self._is_video_file:
+                    with self._overlay_lock:
+                        det_frame = self._overlay_frame
+                    if det_frame is not None:
+                        frame = det_frame.copy()
+                    else:
+                        with self._raw_lock:
+                            raw = self._raw_frame
+                        if raw is None:
+                            continue
+                        frame = raw.copy()
+                else:
+                    with self._raw_lock:
+                        raw = self._raw_frame
+                    if raw is None:
+                        continue
+                    frame = raw.copy()
                 h, w = frame.shape[:2]
 
                 # ── RAW MODE: skip all detection overlays ──

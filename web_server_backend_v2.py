@@ -1,14 +1,3 @@
-"""
-Web Server Backend - PARALLEL ARCHITECTURE
-===========================================
-Entry point: Flask routes + model init.
-All logic is split into separate modules:
-  - tracking_config.py  : all tunable parameters
-  - helpers.py          : bbox metrics
-  - tracking_state.py   : TrackingState (reader, detector, compositor threads)
-  - templates/index.html: web UI
-"""
-
 import time
 import logging
 
@@ -343,11 +332,6 @@ def api_cameras():
 def api_switch():
     """
     Switch checkpoint and/or camera.
-    Body: { "checkpoint_id": "date", "camera_id": "cam1" }
-    Either key is optional. Switching unloads the current model from VRAM
-    and loads the new one. If a camera_id is given and no source is provided
-    the camera source from CAMERAS config is used, unless a custom
-    'custom_source' key is supplied.
     """
     global current_checkpoint_id, current_camera_id
 
