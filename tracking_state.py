@@ -820,6 +820,7 @@ class TrackingState:
                     if self.mode == "tracking":
                         results = self.model.track(
                             frame,
+                            half=True,
                             conf=conf_min,
                             imgsz=CONFIG["imgsz"],
                             verbose=False,

@@ -114,7 +114,7 @@ SERVER_PORT = 5000
 # ==========================
 # FRAME SKIP (detector receives 1 frame out of N)
 # ==========================
-DETECTOR_FRAME_SKIP = 1
+DETECTOR_FRAME_SKIP = 2
 
  
 # ==========================

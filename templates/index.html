@@ -474,14 +474,14 @@
         </div>
 
         <!-- ── DB Recording panel ── -->
-        <div class="panel" id="dbPanel">
+        <!-- <div class="panel" id="dbPanel">
             <h3 style="display:flex; align-items:center;">
                 DB Recording
                 <span id="dbBackendBadge" class="db-backend-badge db-backend-sqlite">SQLite</span>
-            </h3>
+            </h3> -->
 
             <!-- NOK breakdown (only meaningful when session active) -->
-            <div class="db-nok-breakdown">
+            <!-- <div class="db-nok-breakdown">
                 <div class="db-nok-item">
                     <div class="db-nok-val" id="db-nok-barcode">&#8212;</div>
                     <div class="db-nok-label">No Barcode</div>
@@ -494,19 +494,19 @@
                     <div class="db-nok-val" id="db-nok-both" style="color:#d29922;">&#8212;</div>
                     <div class="db-nok-label">Both</div>
                 </div>
-            </div>
+            </div> -->
 
             <!-- Session timing -->
-            <div class="db-session-id" id="dbSessionInfo">No active session</div>
+            <!-- <div class="db-session-id" id="dbSessionInfo">No active session</div> -->
 
             <!-- NOK rate -->
-            <div style="display:flex; justify-content:space-between; font-size:0.78em; color:#8b949e; margin-bottom:10px;">
+            <!-- <div style="display:flex; justify-content:space-between; font-size:0.78em; color:#8b949e; margin-bottom:10px;">
                 <span>NOK rate</span>
                 <span id="dbNokRate" style="color:#8b949e; font-weight:700;">&#8212;</span>
-            </div>
+            </div> -->
 
             <!-- Action buttons -->
-            <div style="display:flex; flex-direction:column; gap:6px;">
+            <!-- <div style="display:flex; flex-direction:column; gap:6px;">
                 <button id="btnStatsToggle" class="db-btn db-btn-record-off" onclick="toggleStatsRecording()">
                     &#9210; Recording: OFF
                 </button>
@@ -518,8 +518,8 @@
                         &#8659; JSON
                     </button>
                 </div>
-            </div>
-        </div>
+            </div> -->
+        <!-- </div> -->
     </div>
 </div>
 
@@ -911,9 +911,8 @@
         const r = await fetch('/api/raw_mode', { method: 'POST' });
         const d = await r.json();
         _applyRawMode(d.raw_mode);
-        showToast(d.raw_mode ? 'Raw video (no detection)' : 'Detection overlay ON', 'info', 1500);
+        showToast(d.raw_mode ? 'Visual anomaly detection' : 'Detection overlay ON', 'info', 1500);
     }
-
     function _applyRawMode(isRaw) {
         const btn = document.getElementById('btnRawMode');
         if (isRaw) {
