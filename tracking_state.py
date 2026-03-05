@@ -21,6 +21,14 @@ from tracking_config import (
     TRACKER_CONFIG,
 )
 
+try:
+    from db_writer import DBWriter
+    from db_config import SNAPSHOT_EVERY_N_PACKETS
+    _DB_AVAILABLE = True
+except ImportError:
+    _DB_AVAILABLE = False
+    SNAPSHOT_EVERY_N_PACKETS = 50
+
 
 def _write_tracker_yaml():
     """Write TRACKER_CONFIG dict to a temp YAML file (Ultralytics needs a file path)."""
@@ -140,6 +148,17 @@ class TrackingState:
         self._stats_lock = threading.Lock()
         self.stats = self._empty_stats()
 
+        # ── DB writer (Thread 4 — fully async, never blocks detection) ──
+        self._db_writer     = DBWriter() if _DB_AVAILABLE else None
+        self._db_session_id = None        # UUID of current session (None = no active session)
+        self._stats_active  = False       # OFF by default — user activates via toggle button
+        # Per-session NOK sub-counters
+        self._nok_no_barcode = 0
+        self._nok_no_date    = 0
+        self._nok_both       = 0
+        if self._db_writer:
+            self._db_writer.start()
+
     # ─────────────────────────────────────────
 
     @staticmethod
@@ -202,6 +221,10 @@ class TrackingState:
         with self._stats_lock:
             self.stats = self._empty_stats()
             self.stats["rotation_deg"] = (self._rotation_steps % 4) * 90
+        # Reset NOK sub-counters
+        self._nok_no_barcode = 0
+        self._nok_no_date    = 0
+        self._nok_both       = 0
 
     @staticmethod
     def _rotate_frame_ccw(frame, steps):
@@ -301,6 +324,9 @@ class TrackingState:
         return {"status": "started", "source": video_source, "mode": mode}
 
     def stop_processing(self):
+        # Session lifecycle is managed by the toggle button, not by stop.
+        # If recording is active when stop is called, leave session open
+        # so it continues when processing resumes.
         self.is_running = False
         self._paused = False
         self._pause_event.set()
@@ -1066,6 +1092,45 @@ class TrackingState:
                             pkg["final_decision"] = final
                             self.output_fifo.append(final)
                             print(f"[DET] Packet #{self.total_packets} -> {final} ({reason})")
+
+                            # ── Compute defect type for DB ──
+                            if self._use_secondary_date:
+                                if not has_bc and not has_dt:
+                                    _defect = "both"
+                                elif not has_bc:
+                                    _defect = "no_barcode"
+                                elif not has_dt:
+                                    _defect = "no_date"
+                                else:
+                                    _defect = None
+                            else:
+                                _defect = "no_barcode" if not has_bc else None
+
+                            # ── Update in-memory NOK sub-counters ──
+                            if _defect == "no_barcode":
+                                self._nok_no_barcode += 1
+                            elif _defect == "no_date":
+                                self._nok_no_date += 1
+                            elif _defect == "both":
+                                self._nok_both += 1
+
+                            # ── Periodic KPI snapshot ──
+                            if (self._db_writer and self._stats_active
+                                    and self._db_session_id
+                                    and self.total_packets % SNAPSHOT_EVERY_N_PACKETS == 0):
+                                try:
+                                    _ok = self.output_fifo.count("OK")
+                                    self._db_writer.write_queue.put_nowait({
+                                        "type":           "snapshot",
+                                        "session_id":     self._db_session_id,
+                                        "total":          self.total_packets,
+                                        "ok_count":       _ok,
+                                        "nok_no_barcode": self._nok_no_barcode,
+                                        "nok_no_date":    self._nok_no_date,
+                                        "nok_both":       self._nok_both,
+                                    })
+                                except Exception:
+                                    pass
 
                 # ── Detection timing ──
                 det_ms = (time.time() - t_start) * 1000

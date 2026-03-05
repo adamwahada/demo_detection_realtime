@@ -1,9 +1,10 @@
 import time
 import logging
+import io
 
 import cv2
 import numpy as np
-from flask import Flask, jsonify, request, Response, render_template
+from flask import Flask, jsonify, request, Response, render_template, make_response
 from ultralytics import YOLO
 
 from tracking_config import (
@@ -385,6 +386,195 @@ def api_switch():
     result["source"] = target_source
     result["camera_id"] = current_camera_id
     return jsonify(result)
+
+# ==========================
+# STATS / DB ENDPOINTS
+# ==========================
+
+@app.route('/api/stats/status')
+def api_stats_status():
+    """Return current stats recording status + live KPI counters."""
+    ok  = state.output_fifo.count("OK")
+    nok = state.output_fifo.count("NOK")
+    total = state.total_packets
+    return jsonify({
+        "stats_active":      getattr(state, '_stats_active', True),
+        "session_id":        getattr(state, '_db_session_id', None),
+        "db_available":      state._db_writer is not None,
+        "total":             total,
+        "ok_count":          ok,
+        "nok_count":         nok,
+        "nok_no_barcode":    getattr(state, '_nok_no_barcode', 0),
+        "nok_no_date":       getattr(state, '_nok_no_date', 0),
+        "nok_both":          getattr(state, '_nok_both', 0),
+        "nok_rate_pct":      round(nok / total * 100, 2) if total > 0 else 0.0,
+    })
+
+
+@app.route('/api/stats/toggle', methods=['POST'])
+def api_stats_toggle():
+    """Toggle stats recording ON/OFF.
+    ON  → open new DB session, reset all counters, start recording.
+    OFF → close session with final totals, reset counters to 0, session_id = None.
+    """
+    request.get_json(force=True, silent=True)
+    currently_active = getattr(state, '_stats_active', False)
+    new_state = not currently_active
+
+    if new_state:
+        # ── Turning ON: reset counters then open a fresh session ──
+        state.total_packets   = 0
+        state.output_fifo     = []
+        state.packet_numbers  = {}
+        state._nok_no_barcode = 0
+        state._nok_no_date    = 0
+        state._nok_both       = 0
+        with state._stats_lock:
+            state.stats["total_packets"] = 0
+            state.stats["packages_ok"]   = 0
+            state.stats["packages_nok"]  = 0
+            state.stats["fifo_queue"]    = []
+        new_sid = None
+        if state._db_writer:
+            cp_id   = (state.current_checkpoint or {}).get("id", "")
+            cam_src = str(state.video_source or "")
+            new_sid = state._db_writer.open_session(
+                checkpoint_id=cp_id,
+                camera_source=cam_src,
+            )
+            state._db_session_id = new_sid
+            state._db_writer.set_active(True)
+        state._stats_active = True
+        return jsonify({"stats_active": True, "session_id": new_sid})
+
+    else:
+        # ── Turning OFF: close session, reset all counters ──
+        if state._db_writer and state._db_session_id:
+            state._db_writer.close_session(
+                state._db_session_id,
+                totals={
+                    "total":          state.total_packets,
+                    "ok_count":       state.output_fifo.count("OK"),
+                    "nok_no_barcode": getattr(state, '_nok_no_barcode', 0),
+                    "nok_no_date":    getattr(state, '_nok_no_date', 0),
+                    "nok_both":       getattr(state, '_nok_both', 0),
+                }
+            )
+            if state._db_writer:
+                state._db_writer.set_active(False)
+        # Reset everything to 0
+        state._db_session_id  = None
+        state._stats_active   = False
+        state.total_packets   = 0
+        state.output_fifo     = []
+        state.packet_numbers  = {}
+        state._nok_no_barcode = 0
+        state._nok_no_date    = 0
+        state._nok_both       = 0
+        with state._stats_lock:
+            state.stats["total_packets"] = 0
+            state.stats["packages_ok"]   = 0
+            state.stats["packages_nok"]  = 0
+            state.stats["fifo_queue"]    = []
+        return jsonify({"stats_active": False, "session_id": None})
+
+
+@app.route('/api/stats/reset', methods=['POST'])
+def api_stats_reset():
+    """
+    Close current session (writes final totals to DB) and open a new one.
+    Zeroes all in-memory counters. Detection keeps running.
+    """
+    request.get_json(force=True, silent=True)  # consume body if any
+    # 1. Close current session with final totals
+    if state._db_writer and state._db_session_id:
+        state._db_writer.close_session(
+            state._db_session_id,
+            totals={
+                "total":          state.total_packets,
+                "ok_count":       state.output_fifo.count("OK"),
+                "nok_no_barcode": getattr(state, '_nok_no_barcode', 0),
+                "nok_no_date":    getattr(state, '_nok_no_date', 0),
+                "nok_both":       getattr(state, '_nok_both', 0),
+            }
+        )
+
+    # 2. Zero in-memory counters (without stopping threads)
+    state.total_packets  = 0
+    state.output_fifo    = []
+    state.packet_numbers = {}
+    state._nok_no_barcode = 0
+    state._nok_no_date    = 0
+    state._nok_both       = 0
+    # Note: packages and packets_crossed_line intentionally NOT reset
+    # so live tracking isn't disrupted mid-frame.
+
+    # 3. Open new session
+    new_session_id = None
+    if state._db_writer:
+        cp_id  = (state.current_checkpoint or {}).get("id", "")
+        cam_src = state.video_source or ""
+        new_session_id = state._db_writer.open_session(
+            checkpoint_id=cp_id,
+            camera_source=str(cam_src),
+        )
+        state._db_session_id = new_session_id
+
+    with state._stats_lock:
+        state.stats["total_packets"] = 0
+        state.stats["packages_ok"]   = 0
+        state.stats["packages_nok"]  = 0
+        state.stats["fifo_queue"]    = []
+
+    return jsonify({"status": "reset", "new_session_id": new_session_id})
+
+
+@app.route('/api/sessions')
+def api_sessions():
+    """List recent sessions from the database."""
+    if not state._db_writer:
+        return jsonify({"error": "DB not available"}), 503
+    limit = int(request.args.get('limit', 50))
+    sessions = state._db_writer.list_sessions(limit=limit)
+    # Convert datetime objects to ISO strings for JSON serialisation
+    for s in sessions:
+        for k in ('started_at', 'ended_at'):
+            if s.get(k) and hasattr(s[k], 'isoformat'):
+                s[k] = s[k].isoformat()
+    return jsonify({"sessions": sessions, "count": len(sessions)})
+
+
+@app.route('/api/export/csv')
+def api_export_csv():
+    """Download a session summary as CSV. ?session_id=<uuid>"""
+    if not state._db_writer:
+        return jsonify({"error": "DB not available"}), 503
+    session_id = request.args.get('session_id')
+    if not session_id:
+        return jsonify({"error": "session_id required"}), 400
+    csv_data = state._db_writer.export_csv(session_id)
+    response = make_response(csv_data)
+    response.headers['Content-Type']        = 'text/csv; charset=utf-8'
+    response.headers['Content-Disposition'] = f'attachment; filename="session_{session_id[:8]}.csv"'
+    return response
+
+
+@app.route('/api/export/json')
+def api_export_json():
+    """Download a session summary as JSON. ?session_id=<uuid>"""
+    if not state._db_writer:
+        return jsonify({"error": "DB not available"}), 503
+    session_id = request.args.get('session_id')
+    if not session_id:
+        return jsonify({"error": "session_id required"}), 400
+    kpis = state._db_writer.get_session_kpis(session_id)
+    if not kpis:
+        return jsonify({"error": "Session not found"}), 404
+    total = kpis.get('total', 0)
+    ok    = kpis.get('ok_count', 0)
+    kpis['nok_count'] = total - ok
+    kpis['nok_rate']  = round((total - ok) / total * 100, 2) if total > 0 else 0.0
+    return jsonify(kpis)
 
 
 # ==========================
