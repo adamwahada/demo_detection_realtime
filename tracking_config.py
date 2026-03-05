@@ -1,13 +1,6 @@
-"""
-Configuration for the Parallel Tracking Web Server.
-All tunable parameters are centralized here.
-"""
-
 # ==========================
 # CHECKPOINTS  (add or remove models here)
 # ==========================
-# mode = "tracking" → full ByteTrack + barcode logic
-# mode = "date"     → simple all-class detection overlay (no tracking)
 CHECKPOINTS = [
     {
         "id":            "tracking",
@@ -25,7 +18,7 @@ CHECKPOINTS = [
         "mode":          "date",
         "package_class": None,   
         "barcode_class": None,
-        "date_class":    None,
+        "date_class":    "date",
     },
     {
         "id":            "barcode_date",
@@ -35,6 +28,11 @@ CHECKPOINTS = [
         "package_class": "package",
         "barcode_class": "barcode",
         "date_class":    "date",
+        # Secondary model for maximum date-detection accuracy.
+        # Runs in parallel on each frame; its date detections are used
+        # for OK/NOK validation alongside barcodes from the primary model.
+        "secondary_date_model_path": "yolo26-BB(date).pt",
+        "secondary_date_class":      "date",
     },
 ]
 
@@ -45,8 +43,8 @@ DEFAULT_CHECKPOINT_ID = "tracking"
 # CAMERAS  (add your camera sources here)
 # ==========================
 CAMERAS = [
-    {"id": "cam0", "label": "Camera 0",  "source": 0},
-    {"id": "cam1", "label": "Camera 1",  "source": 1},
+    {"id": "cam0", "label": "Camera 0",  "source": "/dev/video0"},
+    {"id": "cam1", "label": "Camera 1",  "source": "/dev/video1"},    
 ]
 
 DEFAULT_CAMERA_ID = "cam0"
@@ -115,20 +113,13 @@ SERVER_PORT = 5000
 
 # ==========================
 # FRAME SKIP (detector receives 1 frame out of N)
-# Set to 1 to disable skipping — RTX 4090 can run inference on every frame
-# at full speed. Skipping frames breaks Ultralytics persist=True tracker
-# because its Kalman filter expects consecutive input.
 # ==========================
-DETECTOR_FRAME_SKIP = 1
+DETECTOR_FRAME_SKIP = 2
 
  
 # ==========================
 # BYTETRACK TRACKER (built-in Ultralytics)
 # ==========================
-# Aligned with old custom ByteTrack that was working:
-#   old track_thresh=0.5 → track_high_thresh=0.5
-#   old 2nd-pass floor = track_thresh*0.9 = 0.45 → track_low_thresh=0.45
-#   old det_thresh = track_thresh+0.1 = 0.6 → new_track_thresh=0.6
 TRACKER_CONFIG = {
     "tracker_type": "bytetrack",
     "track_high_thresh": 0.5,
