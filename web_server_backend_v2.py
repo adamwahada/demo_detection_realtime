@@ -73,6 +73,10 @@ def init_models(checkpoint_id=None):
     state.current_checkpoint = checkpoint
     print(f"Model loaded on {DEVICE}. mode={state.mode} package={state.package_id} barcode={state.barcode_id} date={state.date_id}")
 
+    # Load EfficientAD models if anomaly mode
+    if state.mode == "anomaly":
+        state._load_ad_models(checkpoint, DEVICE)
+
     # Apply default rotation for this checkpoint
     default_rot = checkpoint.get("default_rotation", 0) % 4
     state._rotation_steps = default_rot
@@ -134,11 +138,26 @@ def video_feed():
     )
 
 
+ANOMALY_DEMO_VIDEOS = {'testanomalie.mp4', 'testanomalie2.mp4'}
+
 @app.route('/api/start', methods=['POST'])
 def api_start():
+    import os as _os
     data = request.get_json()
     source = data.get('source', '/dev/video0')
-    return jsonify(state.start_processing(source))
+
+    # Auto-configure for pre-rendered anomaly demo videos
+    is_anomaly_demo = (
+        isinstance(source, str) and
+        _os.path.basename(source).lower() in ANOMALY_DEMO_VIDEOS
+    )
+    if is_anomaly_demo:
+        state._raw_mode = True
+        state._exit_line_enabled = False
+
+    result = state.start_processing(source)
+    result['anomaly_demo_mode'] = is_anomaly_demo
+    return jsonify(result)
 
 
 @app.route('/api/stop', methods=['POST'])

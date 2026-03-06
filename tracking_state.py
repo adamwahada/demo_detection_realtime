@@ -13,7 +13,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from helpers import calculate_bbox_metrics
+from helpers import calculate_bbox_metrics, letterbox_image
 from tracking_config import (
     CONFIG, VIDEO_EXTENSIONS, JPEG_QUALITY,
     CAMERA_FPS, CAMERA_WIDTH, CAMERA_HEIGHT,
@@ -67,8 +67,18 @@ class TrackingState:
         self._use_secondary_date = False  # True when secondary model is active
 
         # Active checkpoint info (set by switch_checkpoint / init_models)
-        self.mode = "tracking"          # "tracking" or "date"
+        self.mode = "tracking"          # "tracking", "date", or "anomaly"
         self.current_checkpoint = None  # the checkpoint dict from CHECKPOINTS
+
+        # ── EfficientAD anomaly detection models (loaded for mode="anomaly") ──
+        self._ad_teacher = None
+        self._ad_student = None
+        self._ad_autoencoder = None
+        self._ad_mean = None
+        self._ad_std = None
+        self._ad_quantiles = None
+        self._ad_transform = None
+        self._ad_track_states = {}  # {track_id: {'results': [], 'decision': None}}
 
         # Session generation counter — prevents old reader threads from
         # clobbering is_running after a camera/checkpoint switch
@@ -225,6 +235,8 @@ class TrackingState:
         self._nok_no_barcode = 0
         self._nok_no_date    = 0
         self._nok_both       = 0
+        # Reset anomaly detection per-track states
+        self._ad_track_states = {}
 
     @staticmethod
     def _rotate_frame_ccw(frame, steps):
@@ -433,6 +445,16 @@ class TrackingState:
             self.secondary_model = None
             self._secondary_date_id = None
             self._use_secondary_date = False
+        # Unload EfficientAD models
+        for attr in ('_ad_teacher', '_ad_student', '_ad_autoencoder'):
+            if getattr(self, attr, None) is not None:
+                delattr(self, attr)
+                setattr(self, attr, None)
+        self._ad_mean = None
+        self._ad_std = None
+        self._ad_quantiles = None
+        self._ad_transform = None
+        self._ad_track_states = {}
         try:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -449,16 +471,17 @@ class TrackingState:
             self.model.to(DEVICE)
         except Exception:
             pass
-        # attempt FP16 on CUDA
-        try:
-            if str(DEVICE).lower().startswith("cuda") and torch.cuda.is_available():
-                try:
-                    getattr(self.model, "model", None).half()
-                    print("[SWITCH] Converted model to FP16 (half precision).")
-                except Exception as e:
-                    print(f"[SWITCH] FP16 conversion failed: {e}")
-        except Exception:
-            pass
+        # attempt FP16 on CUDA (skip for anomaly/segmentation models)
+        if self.mode != "anomaly":
+            try:
+                if str(DEVICE).lower().startswith("cuda") and torch.cuda.is_available():
+                    try:
+                        getattr(self.model, "model", None).half()
+                        print("[SWITCH] Converted model to FP16 (half precision).")
+                    except Exception as e:
+                        print(f"[SWITCH] FP16 conversion failed: {e}")
+            except Exception:
+                pass
         names = self.model.names
 
         # 4. Resolve class IDs
@@ -470,6 +493,10 @@ class TrackingState:
         self.date_id = next((k for k, v in names.items() if v == date_cls), None) if date_cls else None
         self.mode = checkpoint.get("mode", "tracking")
         self.current_checkpoint = checkpoint
+
+        # Anomaly mode doesn't use an exit line — disable it automatically
+        if self.mode == "anomaly":
+            self._exit_line_enabled = False
 
         # Ensure each checkpoint has explicit per-class thresholds so
         # switching to a model that doesn't specify them won't break
@@ -530,7 +557,17 @@ class TrackingState:
             self._secondary_date_id = None
             self._use_secondary_date = False
 
-        # 4b. Apply default rotation for this checkpoint
+        # 4b. Load EfficientAD models if anomaly mode
+        if self.mode == "anomaly":
+            self._load_ad_models(checkpoint, DEVICE)
+        else:
+            self._ad_teacher = None
+            self._ad_student = None
+            self._ad_autoencoder = None
+            self._ad_transform = None
+            self._ad_track_states = {}
+
+        # 4c. Apply default rotation for this checkpoint
         default_rot = checkpoint.get("default_rotation", 0)
         if default_rot != self._rotation_steps:
             self._rotation_steps = default_rot % 4
@@ -559,6 +596,129 @@ class TrackingState:
             "was_running": was_running,
             "prev_source": prev_source,
         }
+
+    # ═══════════════════════════════════════════
+    # ANOMALY DETECTION HELPERS
+    # ═══════════════════════════════════════════
+
+    def _load_ad_models(self, checkpoint, device):
+        """Load EfficientAD teacher/student/autoencoder for anomaly mode."""
+        import torch
+        from torchvision import transforms
+        from anomaly_on_video import get_ad_constants
+
+        ad_teacher_path = checkpoint.get("ad_teacher", "teacher_best.pth")
+        ad_student_path = checkpoint.get("ad_student", "student_best.pth")
+        ad_ae_path = checkpoint.get("ad_autoencoder", "autoencoder_best.pth")
+        ad_imgsz = checkpoint.get("ad_imgsz", 256)
+
+        print(f"[SWITCH] Loading EfficientAD models...")
+        self._ad_teacher = torch.load(ad_teacher_path, map_location=device, weights_only=False).eval()
+        self._ad_student = torch.load(ad_student_path, map_location=device, weights_only=False).eval()
+        self._ad_autoencoder = torch.load(ad_ae_path, map_location=device, weights_only=False).eval()
+
+        self._ad_mean, self._ad_std, self._ad_quantiles = get_ad_constants(device)
+
+        self._ad_transform = transforms.Compose([
+            transforms.Resize((ad_imgsz, ad_imgsz)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        self._ad_track_states = {}
+
+        # Warmup EfficientAD
+        try:
+            dummy = torch.zeros(1, 3, ad_imgsz, ad_imgsz, device=device)
+            from efficientad import predict as effpredict
+            effpredict(
+                image=dummy, teacher=self._ad_teacher, student=self._ad_student,
+                autoencoder=self._ad_autoencoder, teacher_mean=self._ad_mean,
+                teacher_std=self._ad_std,
+                q_st_start=self._ad_quantiles['q_st_start'],
+                q_st_end=self._ad_quantiles['q_st_end'],
+                q_ae_start=self._ad_quantiles['q_ae_start'],
+                q_ae_end=self._ad_quantiles['q_ae_end']
+            )
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            print("[SWITCH] EfficientAD warmup done.")
+        except Exception as e:
+            print(f"[SWITCH] EfficientAD warmup failed (non-fatal): {e}")
+
+    def _ad_crop_and_mask(self, frame, mask_raw, checkpoint):
+        """Crop object using segmentation mask, blackout background, letterbox."""
+        h_f, w_f = frame.shape[:2]
+        mask_full = cv2.resize(mask_raw, (w_f, h_f), interpolation=cv2.INTER_LINEAR)
+        _, mask_full = cv2.threshold(mask_full, 0.5, 1, cv2.THRESH_BINARY)
+
+        rows, cols = np.where(mask_full > 0)
+        if len(rows) == 0:
+            return None
+        x1, y1, x2, y2 = np.min(cols), np.min(rows), np.max(cols), np.max(rows)
+
+        w_box, h_box = x2 - x1, y2 - y1
+        margin = checkpoint.get("ad_margin_pct", 0.1)
+        m_x, m_y = int(w_box * margin), int(h_box * margin)
+
+        cx1, cy1 = max(0, x1 - m_x), max(0, y1 - m_y)
+        cx2, cy2 = min(w_f, x2 + m_x), min(h_f, y2 + m_y)
+
+        img_crop = frame[cy1:cy2, cx1:cx2].copy()
+        mask_crop = mask_full[cy1:cy2, cx1:cx2].copy()
+
+        erosion_size = checkpoint.get("ad_erosion_size", 3)
+        if erosion_size > 0:
+            mask_blurred = cv2.GaussianBlur(mask_crop, (5, 5), 0)
+            _, mask_final = cv2.threshold(mask_blurred, 0.5, 1, cv2.THRESH_BINARY)
+            mask_final = mask_final.astype(np.uint8)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erosion_size, erosion_size))
+            mask_final = cv2.erode(mask_final, kernel, iterations=1)
+        else:
+            mask_final = mask_crop.astype(np.uint8)
+
+        img_crop[mask_final == 0] = 0
+        img_rgb = cv2.cvtColor(img_crop, cv2.COLOR_BGR2RGB)
+        return letterbox_image(img_rgb)
+
+    def _ad_detect_anomaly(self, img_crop_np):
+        """Run EfficientAD on a preprocessed crop. Returns (is_defective, score)."""
+        import torch
+        from PIL import Image
+        from efficientad import predict as effpredict
+
+        pil_img = Image.fromarray(img_crop_np)
+        orig_w, orig_h = pil_img.size
+        img_tensor = self._ad_transform(pil_img).unsqueeze(0)
+        device = next(self._ad_teacher.parameters()).device
+        img_tensor = img_tensor.to(device)
+
+        map_combined, _, _ = effpredict(
+            image=img_tensor, teacher=self._ad_teacher, student=self._ad_student,
+            autoencoder=self._ad_autoencoder, teacher_mean=self._ad_mean,
+            teacher_std=self._ad_std,
+            q_st_start=self._ad_quantiles['q_st_start'],
+            q_st_end=self._ad_quantiles['q_st_end'],
+            q_ae_start=self._ad_quantiles['q_ae_start'],
+            q_ae_end=self._ad_quantiles['q_ae_end']
+        )
+
+        map_combined = torch.nn.functional.pad(map_combined, (4, 4, 4, 4))
+        map_combined = torch.nn.functional.interpolate(
+            map_combined, (orig_h, orig_w), mode='bilinear')
+        score = map_combined[0, 0].cpu().numpy().max()
+
+        thresh = (self.current_checkpoint or {}).get("ad_thresh", 5000.0)
+        return score > thresh, float(score)
+
+    @staticmethod
+    def _ad_final_decision(results, strategy="MAJORITY"):
+        """Aggregate per-frame anomaly results into a final decision."""
+        if not results:
+            return False
+        if strategy == "OR":
+            return any(results)
+        # MAJORITY
+        return sum(results) > (len(results) / 2)
 
     # ═══════════════════════════════════════════
     # THREAD 1: VIDEO READER (smooth, native FPS)
@@ -817,6 +977,10 @@ class TrackingState:
                     ]
                     conf_min = min(conf_list) if conf_list else CONFIG.get("conf_date", 0.25)
 
+                    # Per-checkpoint overrides for imgsz / conf
+                    yolo_imgsz = cp.get("yolo_imgsz", CONFIG["imgsz"])
+                    yolo_conf = cp.get("yolo_conf", conf_min)
+
                     if self.mode == "tracking":
                         results = self.model.track(
                             frame,
@@ -826,6 +990,17 @@ class TrackingState:
                             verbose=False,
                             persist=True,
                             tracker=TRACKER_YAML_PATH,
+                        )[0]
+                    elif self.mode == "anomaly":
+                        results = self.model.track(
+                            frame,
+                            half=False,
+                            conf=yolo_conf,
+                            imgsz=yolo_imgsz,
+                            verbose=False,
+                            persist=True,
+                            tracker=TRACKER_YAML_PATH,
+                            retina_masks=True,
                         )[0]
                     else:
                         results = self.model(
@@ -870,6 +1045,117 @@ class TrackingState:
                         self.stats.update({
                             "det_fps":       round(det_fps, 1),
                             "inference_ms":  round(det_ms, 1),
+                        })
+                    continue
+
+                # ── ANOMALY DETECTION mode ──
+                if self.mode == "anomaly":
+                    cp = self.current_checkpoint or {}
+                    zone_start_pct = cp.get("zone_start_pct", 0.20)
+                    zone_end_pct = cp.get("zone_end_pct", 0.60)
+                    ad_strategy = cp.get("ad_strategy", "MAJORITY")
+                    h_f, w_f = frame.shape[:2]
+                    zone_start_px = int(w_f * zone_start_pct)
+                    zone_end_px = int(w_f * zone_end_pct)
+
+                    track_boxes = []
+                    ad_zone_lines = (zone_start_px, zone_end_px)
+
+                    has_masks = results.masks is not None
+                    has_ids = results.boxes is not None and results.boxes.id is not None
+
+                    if has_masks and has_ids:
+                        masks = results.masks.data.cpu().numpy()
+                        boxes = results.boxes.xyxy.cpu().numpy()
+                        track_ids = results.boxes.id.int().cpu().tolist()
+
+                        for i, tid in enumerate(track_ids):
+                            if tid not in self._ad_track_states:
+                                self._ad_track_states[tid] = {'results': [], 'decision': None}
+                            tstate = self._ad_track_states[tid]
+
+                            x1, y1, x2, y2 = map(int, boxes[i])
+                            center_x = (x1 + x2) // 2
+
+                            label = "WAITING"
+                            color = (200, 200, 200)  # grey
+
+                            # Before zone: entering
+                            if center_x > zone_end_px:
+                                label = f"T{tid} ENTERING"
+                                color = (200, 200, 200)
+
+                            # Inside zone: scan with EfficientAD
+                            elif zone_start_px <= center_x <= zone_end_px and tstate['decision'] is None:
+                                img_crop = self._ad_crop_and_mask(frame, masks[i], cp)
+                                if img_crop is not None:
+                                    try:
+                                        is_def, score = self._ad_detect_anomaly(img_crop)
+                                        tstate['results'].append(is_def)
+                                        label = f"T{tid} SCANNING"
+                                        color = (0, 255, 255)  # cyan
+                                    except Exception as ad_err:
+                                        print(f"[AD] Error on track {tid}: {ad_err}")
+                                        label = f"T{tid} AD-ERR"
+                                        color = (0, 165, 255)  # orange
+                                else:
+                                    label = f"T{tid} SCANNING"
+                                    color = (0, 255, 255)
+
+                            # Past zone: lock decision
+                            else:
+                                if tstate['decision'] is None:
+                                    tstate['decision'] = self._ad_final_decision(
+                                        tstate['results'], strategy=ad_strategy)
+                                is_def = tstate['decision']
+
+                                if tid not in self.packets_crossed_line:
+                                    self.packets_crossed_line.add(tid)
+                                    self.total_packets += 1
+                                    self.packet_numbers[tid] = self.total_packets
+                                    final = "NOK" if is_def else "OK"
+                                    self.output_fifo.append(final)
+                                    print(f"[AD] Packet #{self.total_packets} -> {final} "
+                                          f"(scans={len(tstate['results'])})")
+
+                                pkt_num = self.packet_numbers.get(tid)
+                                if is_def:
+                                    label = f"#{pkt_num} DEFECTIVE" if pkt_num else f"T{tid} DEFECTIVE"
+                                    color = (0, 0, 255)  # red
+                                else:
+                                    label = f"#{pkt_num} GOOD" if pkt_num else f"T{tid} GOOD"
+                                    color = (0, 255, 0)  # green
+
+                            track_boxes.append((x1, y1, x2, y2, label, color))
+
+                    det_ms = (time.time() - t_start) * 1000
+                    det_fps = 1000 / det_ms if det_ms > 0 else 0
+
+                    ok = self.output_fifo.count("OK")
+                    nok = self.output_fifo.count("NOK")
+
+                    with self._overlay_lock:
+                        self._overlay = {
+                            'track_boxes': track_boxes,
+                            'barcode_boxes': [],
+                            'date_boxes': [],
+                            'exit_line_y': self._exit_line_y,
+                            'total_packets': self.total_packets,
+                            'fifo_str': '(anomaly mode)',
+                            'det_fps': det_fps,
+                            'det_ms': det_ms,
+                            'frame_idx': frame_idx,
+                            'ad_zone_lines': ad_zone_lines,
+                        }
+                        self._overlay_frame = frame
+                    with self._stats_lock:
+                        self.stats.update({
+                            "det_fps": round(det_fps, 1),
+                            "inference_ms": round(det_ms, 1),
+                            "total_packets": self.total_packets,
+                            "packages_ok": ok,
+                            "packages_nok": nok,
+                            "fifo_queue": list(self.output_fifo[-10:]),
                         })
                     continue
 
@@ -1254,6 +1540,7 @@ class TrackingState:
                     ov_fifo      = self._overlay.get('fifo_str', '(empty)')
                     ov_det_fps   = self._overlay.get('det_fps', 0)
                     ov_det_ms    = self._overlay.get('det_ms', 0)
+                    ov_ad_zones  = self._overlay.get('ad_zone_lines', None)
 
                 ov_ely = self._exit_line_y
                 ov_line_vert = self._exit_line_vertical
@@ -1290,6 +1577,16 @@ class TrackingState:
                         cv2.line(frame, (0, ov_ely), (w, ov_ely), (255, 0, 0), 3)
                         cv2.putText(frame, "EXIT LINE", (w - 200, ov_ely - 10),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+
+                # ── Draw anomaly detection zone lines (vertical) ──
+                if ov_ad_zones is not None:
+                    zs, ze = ov_ad_zones
+                    cv2.line(frame, (zs, 0), (zs, h), (255, 0, 255), 2)
+                    cv2.line(frame, (ze, 0), (ze, h), (255, 0, 255), 2)
+                    cv2.putText(frame, "SCAN START", (ze + 6, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+                    cv2.putText(frame, "SCAN END", (zs + 6, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
 
                 # ── HUD ──
                 cv2.putText(frame, f"FIFO: {ov_fifo}", (10, 30),

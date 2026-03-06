@@ -34,6 +34,31 @@ CHECKPOINTS = [
         "secondary_date_model_path": "yolo26-BB(date).pt",
         "secondary_date_class":      "date",
     },
+    {
+        "id":            "anomaly",
+        "label":         "Segmentation + Anomaly Detection",
+        "path":          "yolo26m_seg_farine_FV.pt",
+        "mode":          "anomaly",
+        "package_class": "farine",
+        "barcode_class": None,
+        "date_class":    None,
+        # YOLO overrides for segmentation quality
+        "yolo_imgsz":    640,
+        "yolo_conf":     0.5,
+        # EfficientAD model paths
+        "ad_teacher":    "teacher_best.pth",
+        "ad_student":    "student_best.pth",
+        "ad_autoencoder": "autoencoder_best.pth",
+        # Anomaly detection parameters
+        "ad_thresh":     5000.0,
+        "ad_imgsz":      256,
+        "ad_strategy":   "MAJORITY",
+        "ad_margin_pct": 0.1,
+        "ad_erosion_size": 3,
+        # Zone: start/end scanning as % of frame width
+        "zone_start_pct": 0.20,
+        "zone_end_pct":   0.60,
+    },
 ]
 
 # Active checkpoint at startup (must match one of the ids above)

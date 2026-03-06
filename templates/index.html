@@ -421,11 +421,18 @@
             </button>
         </div>
 
-        <div class="legend">
+        <div class="legend" id="legend-default">
             <div class="leg-item"><span class="leg-dot" style="background:#3fb950"></span> OK (barcode)</div>
             <div class="leg-item"><span class="leg-dot" style="background:#f85149"></span> NOK (no barcode)</div>
             <div class="leg-item"><span class="leg-dot" style="background:#58a6ff"></span> Decision locked</div>
             <div class="leg-item"><span class="leg-dot" style="background:#00c8ff"></span> Date detection</div>
+        </div>
+        <div class="legend" id="legend-anomaly" style="display:none">
+            <div class="leg-item"><span class="leg-dot" style="background:#00e5ff"></span> Scanning</div>
+            <div class="leg-item"><span class="leg-dot" style="background:#3fb950"></span> Good</div>
+            <div class="leg-item"><span class="leg-dot" style="background:#f85149"></span> Defective</div>
+            <div class="leg-item"><span class="leg-dot" style="background:#888"></span> Entering</div>
+            <div class="leg-item"><span class="leg-dot" style="background:#ff00ff"></span> Scan zone</div>
         </div>
     </div>
 
@@ -796,6 +803,15 @@
                     _videoEndedNotified = false;
                     _isPaused = false;
                     _updatePauseBtn();
+                    // Auto-configure UI for pre-rendered anomaly demo videos
+                    if (d.anomaly_demo_mode) {
+                        _applyRawMode(true);
+                        exitLineEnabled = false;
+                        const btnEl = document.getElementById('btnExitLine');
+                        btnEl.textContent = '\u2501 Exit Line: OFF';
+                        btnEl.className = 'btn-exit-off';
+                        showToast('\uD83D\uDCF9 Anomaly demo mode — raw playback', 'info', 3000);
+                    }
                     const img = document.querySelector('.stream-container img');
                     if (img) {
                         img.src = '';
@@ -942,6 +958,11 @@
             document.getElementById('badge-vfps').textContent = 'Video: '  + (d.video_fps||0)  + ' fps';
             document.getElementById('badge-dfps').textContent = 'YOLO: '   + (d.det_fps||0)    + ' fps';
             document.getElementById('badge-mode').textContent = 'mode: '   + (d.checkpoint_mode || '—');
+
+            // Switch legend based on checkpoint mode
+            const isAnomaly = d.checkpoint_mode === 'anomaly';
+            document.getElementById('legend-default').style.display = isAnomaly ? 'none' : 'flex';
+            document.getElementById('legend-anomaly').style.display = isAnomaly ? 'flex' : 'none';
 
             const lbl = d.checkpoint_label || d.checkpoint_id || '—';
             document.getElementById('headerCheckpoint').textContent = lbl;
