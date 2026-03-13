@@ -56,8 +56,8 @@ CHECKPOINTS = [
         "ad_margin_pct": 0.1,
         "ad_erosion_size": 3,
         # Zone: start/end scanning as % of frame width
-        "zone_start_pct": 0.20,
-        "zone_end_pct":   0.60,
+        "zone_start_pct": 0.40,
+        "zone_end_pct":   0.80,
     },
 ]
 

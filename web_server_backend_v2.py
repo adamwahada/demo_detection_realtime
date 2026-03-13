@@ -4,7 +4,7 @@ import io
 
 import cv2
 import numpy as np
-from flask import Flask, jsonify, request, Response, render_template, make_response
+from flask import Flask, jsonify, request, Response, render_template, make_response, send_from_directory
 from ultralytics import YOLO
 
 from tracking_config import (
@@ -61,6 +61,9 @@ def init_models(checkpoint_id=None):
                 print(f"[INIT] FP16 conversion failed: {e}")
     except Exception:
         pass
+    print(f"Model device: {state.model.device}")
+    if torch.cuda.is_available():
+        print(f"CUDA memory: {torch.cuda.memory_allocated() / 1024**2:.1f} MB")
     names = state.model.names
 
     pkg_cls = checkpoint.get("package_class")
@@ -86,7 +89,7 @@ def init_models(checkpoint_id=None):
     print(f"Default rotation: {deg}° CCW")
 
     print("Warming up YOLO (dummy inference)...")
-    dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+    dummy = np.zeros((640, 640, 3), dtype=np.float32)
     try:
         state.model(dummy, imgsz=CONFIG["imgsz"], verbose=False)
         import torch
@@ -219,6 +222,7 @@ def api_stats():
     s["exit_line_pct"] = state._exit_line_pct
     # Video playback info
     s["paused"] = state._paused
+    s["has_source"] = bool(getattr(state, 'video_source', None))
     s["playback_speed"] = state._playback_speed
     s["raw_mode"] = state._raw_mode
     s["is_video_file"] = state._is_video_file
@@ -385,13 +389,15 @@ def api_switch():
             "source": new_source,
         })
 
-    # Checkpoint switch: unload old, load new, restart if was running
+    # Checkpoint switch: unload old, load new. Restart only if it was
+    # running and NOT paused (respect user-initiated pause).
     checkpoint = get_checkpoint(new_cp_id)
     if checkpoint is None:
         return jsonify({"error": f"Unknown checkpoint id: {new_cp_id}"}), 400
 
     # Override source if a new camera was also selected
     was_running = state.is_running
+    was_paused = getattr(state, '_paused', False)
     prev_source = state.video_source
 
     result = state.switch_checkpoint(checkpoint)
@@ -399,7 +405,8 @@ def api_switch():
 
     # Use new_source if provided, otherwise keep existing source
     target_source = new_source or prev_source
-    if was_running and target_source:
+    # Only auto-restart if it was running and the user hadn't paused it.
+    if was_running and target_source and not was_paused:
         state.start_processing(target_source)
 
     result["source"] = target_source
@@ -594,6 +601,38 @@ def api_export_json():
     kpis['nok_count'] = total - ok
     kpis['nok_rate']  = round((total - ok) / total * 100, 2) if total > 0 else 0.0
     return jsonify(kpis)
+
+
+@app.route('/api/sessions/<session_id>/images')
+def api_session_images(session_id):
+    """Get all images for a session."""
+    if not state._db_writer:
+        return jsonify({"error": "DB not available"}), 503
+    images = state._db_writer.get_session_images(session_id)
+    # Convert datetime objects to ISO strings
+    for img in images:
+        if img.get('captured_at') and hasattr(img['captured_at'], 'isoformat'):
+            img['captured_at'] = img['captured_at'].isoformat()
+    return jsonify({"images": images, "count": len(images)})
+
+
+@app.route('/api/daily-stats')
+def api_daily_stats():
+    """Get daily aggregated statistics for today or a specific date."""
+    if not state._db_writer:
+        return jsonify({"error": "DB not available"}), 503
+    date = request.args.get('date')
+    stats = state._db_writer.get_daily_stats(date)
+    return jsonify(stats)
+
+
+@app.route('/images/<path:filepath>')
+def serve_image(filepath):
+    """Serve saved images from the images directory."""
+    try:
+        return send_from_directory(_os.path.join(_os.path.dirname(__file__), 'images'), filepath)
+    except FileNotFoundError:
+        return jsonify({"error": "Image not found"}), 404
 
 
 # ==========================

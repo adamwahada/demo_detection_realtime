@@ -335,13 +335,24 @@ class TrackingState:
         mode = "video_file" if self._is_video_file else "live"
         return {"status": "started", "source": video_source, "mode": mode}
 
-    def stop_processing(self):
+    def stop_processing(self, preserve_pause: bool = False):
         # Session lifecycle is managed by the toggle button, not by stop.
         # If recording is active when stop is called, leave session open
         # so it continues when processing resumes.
+        # By default stopping will clear the paused state, but callers can
+        # request the paused state to be preserved (useful for checkpoint
+        # switches so a paused UI remains paused after reload).
         self.is_running = False
-        self._paused = False
-        self._pause_event.set()
+        if not preserve_pause:
+            self._paused = False
+            self._pause_event.set()
+        else:
+            # Keep pause flag as-is. Ensure the pause event matches the flag
+            # (cleared when paused, set when not paused).
+            if getattr(self, '_paused', False):
+                self._pause_event.clear()
+            else:
+                self._pause_event.set()
         time.sleep(0.5)
         if self.cap:
             try:
@@ -376,8 +387,15 @@ class TrackingState:
 
     def resume_processing(self):
         """Resume from pause."""
+        # If processing is not running, try to start it using the last
+        # known `video_source` so the UI Resume button can be used after
+        # a Stop + checkpoint change (user expects to continue where they left off).
         if not self.is_running:
-            return {"error": "Not running"}
+            if getattr(self, 'video_source', None):
+                self.start_processing(self.video_source)
+            else:
+                return {"error": "Not running"}
+        # Clear paused flag / event to continue processing
         self._paused = False
         self._pause_event.set()
         with self._stats_lock:
@@ -432,7 +450,9 @@ class TrackingState:
         # 1. Stop current processing
         if was_running:
             print(f"[SWITCH] Stopping current processing...")
-            self.stop_processing()
+            # Preserve paused state so a user-paused session remains paused
+            # after switching checkpoints.
+            self.stop_processing(preserve_pause=True)
 
         # 2. Unload models from VRAM
         if self.model is not None:
@@ -1118,7 +1138,27 @@ class TrackingState:
                                     print(f"[AD] Packet #{self.total_packets} -> {final} "
                                           f"(scans={len(tstate['results'])})")
 
-                                pkt_num = self.packet_numbers.get(tid)
+                                    # ── Save image locally for NOK packets only ──
+                                    if final == "NOK":
+                                        try:
+                                            # Create folder structure: images/{session_id}/anomaly/
+                                            session_dir = os.path.join(os.path.dirname(__file__), "images", str(self._db_session_id))
+                                            defect_dir = os.path.join(session_dir, "anomaly")
+                                            os.makedirs(defect_dir, exist_ok=True)
+
+                                            # Save image as {packet_number}.jpg
+                                            image_filename = f"{self.total_packets}.jpg"
+                                            image_path = os.path.join(defect_dir, image_filename)
+                                            cv2.imwrite(image_path, frame)
+
+                                            # Record image in database
+                                            relative_path = f"{self._db_session_id}/anomaly/{image_filename}"
+                                            if self._db_writer:
+                                                self._db_writer.record_image(self._db_session_id, self.total_packets, "anomaly", relative_path)
+
+                                            print(f"[IMAGE] Saved NOK packet {self.total_packets} to anomaly folder")
+                                        except Exception as img_err:
+                                            print(f"[IMAGE] Error saving image: {img_err}")
                                 if is_def:
                                     label = f"#{pkt_num} DEFECTIVE" if pkt_num else f"T{tid} DEFECTIVE"
                                     color = (0, 0, 255)  # red
@@ -1378,6 +1418,42 @@ class TrackingState:
                             pkg["decision_locked"] = True
                             pkg["final_decision"] = final
                             self.output_fifo.append(final)
+
+                            # ── Save image locally for NOK packets only ──
+                            if final == "NOK":
+                                try:
+                                    # Determine defect type
+                                    if self._use_secondary_date:
+                                        if not has_bc and not has_dt:
+                                            defect_type = "both"
+                                        elif not has_bc:
+                                            defect_type = "no_barcode"
+                                        elif not has_dt:
+                                            defect_type = "no_date"
+                                        else:
+                                            defect_type = "unknown"
+                                    else:
+                                        defect_type = "no_barcode" if not has_bc else "unknown"
+
+                                    # Create folder structure: images/{session_id}/{defect_type}/
+                                    session_dir = os.path.join(os.path.dirname(__file__), "images", str(self._db_session_id))
+                                    defect_dir = os.path.join(session_dir, defect_type)
+                                    os.makedirs(defect_dir, exist_ok=True)
+
+                                    # Save image as {packet_number}.jpg
+                                    image_filename = f"{self.total_packets}.jpg"
+                                    image_path = os.path.join(defect_dir, image_filename)
+                                    cv2.imwrite(image_path, frame)
+
+                                    # Record image in database
+                                    relative_path = f"{self._db_session_id}/{defect_type}/{image_filename}"
+                                    if self._db_writer:
+                                        self._db_writer.record_image(self._db_session_id, self.total_packets, defect_type, relative_path)
+
+                                    print(f"[IMAGE] Saved NOK packet {self.total_packets} to {defect_type} folder")
+                                except Exception as img_err:
+                                    print(f"[IMAGE] Error saving image: {img_err}")
+
                             print(f"[DET] Packet #{self.total_packets} -> {final} ({reason})")
 
                             # ── Compute defect type for DB ──

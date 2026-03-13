@@ -481,52 +481,52 @@
         </div>
 
         <!-- ── DB Recording panel ── -->
-        <!-- <div class="panel" id="dbPanel">
-            <h3 style="display:flex; align-items:center;">
-                DB Recording
-                <span id="dbBackendBadge" class="db-backend-badge db-backend-sqlite">SQLite</span>
-            </h3> -->
+    <div class="panel" id="dbPanel">
+        <h3 style="display:flex; align-items:center;">
+            DB Recording
+            <span id="dbBackendBadge" class="db-backend-badge db-backend-postgres">PostgreSQL</span>
+        </h3>
 
-            <!-- NOK breakdown (only meaningful when session active) -->
-            <!-- <div class="db-nok-breakdown">
-                <div class="db-nok-item">
-                    <div class="db-nok-val" id="db-nok-barcode">&#8212;</div>
-                    <div class="db-nok-label">No Barcode</div>
-                </div>
-                <div class="db-nok-item">
-                    <div class="db-nok-val" id="db-nok-date">&#8212;</div>
-                    <div class="db-nok-label">No Date</div>
-                </div>
-                <div class="db-nok-item">
-                    <div class="db-nok-val" id="db-nok-both" style="color:#d29922;">&#8212;</div>
-                    <div class="db-nok-label">Both</div>
-                </div>
-            </div> -->
+        <!-- NOK breakdown (only meaningful when session active) -->
+        <div class="db-nok-breakdown">
+            <div class="db-nok-item">
+                <div class="db-nok-val" id="db-nok-barcode">&#8212;</div>
+                <div class="db-nok-label">No Barcode</div>
+            </div>
+            <div class="db-nok-item">
+                <div class="db-nok-val" id="db-nok-date">&#8212;</div>
+                <div class="db-nok-label">No Date</div>
+            </div>
+            <div class="db-nok-item">
+                <div class="db-nok-val" id="db-nok-both" style="color:#d29922;">&#8212;</div>
+                <div class="db-nok-label">Both</div>
+            </div>
+        </div>
 
-            <!-- Session timing -->
-            <!-- <div class="db-session-id" id="dbSessionInfo">No active session</div> -->
+        <!-- Session timing -->
+        <div class="db-session-id" id="dbSessionInfo">No active session</div>
 
-            <!-- NOK rate -->
-            <!-- <div style="display:flex; justify-content:space-between; font-size:0.78em; color:#8b949e; margin-bottom:10px;">
-                <span>NOK rate</span>
-                <span id="dbNokRate" style="color:#8b949e; font-weight:700;">&#8212;</span>
-            </div> -->
+        <!-- NOK rate -->
+        <div style="display:flex; justify-content:space-between; font-size:0.78em; color:#8b949e; margin-bottom:10px;">
+            <span>NOK rate</span>
+            <span id="dbNokRate" style="color:#8b949e; font-weight:700;">&#8212;</span>
+        </div>
 
-            <!-- Action buttons -->
-            <!-- <div style="display:flex; flex-direction:column; gap:6px;">
-                <button id="btnStatsToggle" class="db-btn db-btn-record-off" onclick="toggleStatsRecording()">
-                    &#9210; Recording: OFF
+        <!-- Action buttons -->
+        <div style="display:flex; flex-direction:column; gap:6px;">
+            <button id="btnStatsToggle" class="db-btn db-btn-record-off" onclick="toggleStatsRecording()">
+                &#9210; Recording: OFF
+            </button>
+            <div style="display:flex; gap:6px;">
+                <button class="db-btn db-btn-export" onclick="openSessionPicker('csv')" title="Export a session as CSV">
+                    &#8659; CSV
                 </button>
-                <div style="display:flex; gap:6px;">
-                    <button class="db-btn db-btn-export" onclick="openSessionPicker('csv')" title="Export a session as CSV">
-                        &#8659; CSV
-                    </button>
-                    <button class="db-btn db-btn-export" onclick="openSessionPicker('json')" title="Export a session as JSON">
-                        &#8659; JSON
-                    </button>
-                </div>
-            </div> -->
-        <!-- </div> -->
+                <button class="db-btn db-btn-export" onclick="openSessionPicker('json')" title="Export a session as JSON">
+                    &#8659; JSON
+                </button>
+            </div>
+        </div>
+    </div>
     </div>
 </div>
 
@@ -780,6 +780,7 @@
 
     /* ─── Start / Pause / Resume ─── */
     let _isPaused = false;
+    let _canResume = false;  // stopped but has a source — Resume button stays enabled
 
     function startTracking() {
         fetch('/api/cameras').then(r => r.json()).then(camData => {
@@ -802,6 +803,7 @@
                     showToast('\u25b6 Started: ' + String(src).split('/').pop(), 'success');
                     _videoEndedNotified = false;
                     _isPaused = false;
+                    _canResume = false;
                     _updatePauseBtn();
                     // Auto-configure UI for pre-rendered anomaly demo videos
                     if (d.anomaly_demo_mode) {
@@ -829,16 +831,19 @@
             .then(() => {
                 showToast('\u23f9 Stopped', 'info');
                 _isPaused = false;
+                _canResume = true;  // keep Resume button active so user can restart
                 _updatePauseBtn();
+                document.getElementById('btnPause').disabled = false;
             });
     }
 
     async function togglePause() {
-        if (_isPaused) {
+        if (_isPaused || _canResume) {
             const r = await fetch('/api/resume', { method: 'POST' });
             const d = await r.json();
             if (!d.error) {
                 _isPaused = false;
+                _canResume = false;
                 showToast('\u25b6 Resumed', 'success', 1500);
             }
         } else {
@@ -854,7 +859,7 @@
 
     function _updatePauseBtn() {
         const btn = document.getElementById('btnPause');
-        if (_isPaused) {
+        if (_isPaused || _canResume) {
             btn.innerHTML = '&#9654; Resume';
             btn.className = 'btn-resume';
         } else {
@@ -1009,14 +1014,24 @@
             // ── Sync pause button ──
             const btn_p = document.getElementById('btnPause');
             if (d.is_running) {
+                _canResume = false;
                 btn_p.disabled = false;
                 if (d.paused !== _isPaused) {
                     _isPaused = d.paused;
                     _updatePauseBtn();
                 }
             } else {
-                btn_p.disabled = true;
-                if (_isPaused) { _isPaused = false; _updatePauseBtn(); }
+                // Not running: enable button only if there is a source to resume from
+                if (d.has_source) {
+                    _canResume = true;
+                    btn_p.disabled = false;
+                    if (_isPaused) { _isPaused = false; }
+                    _updatePauseBtn();
+                } else {
+                    _canResume = false;
+                    btn_p.disabled = true;
+                    if (_isPaused) { _isPaused = false; _updatePauseBtn(); }
+                }
             }
 
             // ── Sync video controls bar (show for video files) ──

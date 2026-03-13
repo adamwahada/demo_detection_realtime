@@ -1,19 +1,11 @@
-"""
-Database & storage configuration.
-All connection settings live here — never hardcoded elsewhere.
-"""
-
 # ==========================
 # PostgreSQL (Docker container)
 # ==========================
 DB_HOST     = "localhost"
-DB_PORT     = 5432
-DB_NAME     = "tracking"
+DB_PORT     = 5433
+DB_NAME     = "khomsa"
 DB_USER     = "tracking_user"
-DB_PASSWORD = "changeme"
-
-# Connection string (for tools like DBeaver or psql cli)
-# psql -U tracking_user -d tracking -h localhost
+DB_PASSWORD = "aa"
 
 # ==========================
 # MinIO (local S3 — Docker container)
