@@ -1,3 +1,5 @@
+"""
+Web Server Backend - PARALLEL ARCHITECTURE
 import time
 import logging
 import io
@@ -45,22 +47,7 @@ def init_models(checkpoint_id=None):
     current_checkpoint_id = checkpoint_id
     print(f"Loading model: {checkpoint['label']} ({checkpoint['path']})...")
     state.model = YOLO(checkpoint["path"])
-    # move model to configured device (best-effort)
-    try:
-        state.model.to(DEVICE)
-    except Exception:
-        pass
-    # attempt FP16 conversion when using CUDA
-    try:
-        import torch
-        if str(DEVICE).lower().startswith("cuda") and torch.cuda.is_available():
-            try:
-                getattr(state.model, "model", None).half()
-                print("[INIT] Converted model to FP16 (half precision).")
-            except Exception as e:
-                print(f"[INIT] FP16 conversion failed: {e}")
-    except Exception:
-        pass
+    state.model.to(DEVICE)
     names = state.model.names
 
     pkg_cls = checkpoint.get("package_class")
@@ -73,13 +60,35 @@ def init_models(checkpoint_id=None):
     state.current_checkpoint = checkpoint
     print(f"Model loaded on {DEVICE}. mode={state.mode} package={state.package_id} barcode={state.barcode_id} date={state.date_id}")
 
-    # Apply default rotation for this checkpoint
-    default_rot = checkpoint.get("default_rotation", 0) % 4
-    state._rotation_steps = default_rot
-    deg = default_rot * 90
-    with state._stats_lock:
-        state.stats["rotation_deg"] = deg
-    print(f"Default rotation: {deg}° CCW")
+    # Load secondary date model when configured on tracking checkpoints
+    sec_path = checkpoint.get("secondary_date_model_path")
+    sec_cls = checkpoint.get("secondary_date_class")
+    if sec_path and state.mode == "tracking":
+        try:
+            state.secondary_model = YOLO(sec_path)
+            state.secondary_model.to(DEVICE)
+            sec_names = state.secondary_model.names
+            state._secondary_date_id = next(
+                (k for k, v in sec_names.items() if v == sec_cls), None
+            ) if sec_cls else None
+            state._use_secondary_date = state._secondary_date_id is not None
+            print(f"Secondary date model loaded: id={state._secondary_date_id}")
+        except Exception as e:
+            state.secondary_model = None
+            state._secondary_date_id = None
+            state._use_secondary_date = False
+            print(f"Secondary date model load failed (non-fatal): {e}")
+    else:
+        state.secondary_model = None
+        state._secondary_date_id = None
+        state._use_secondary_date = False
+
+    # If this checkpoint is the anomaly detector, attempt to register/load AD models
+    if state.mode == "anomaly":
+        try:
+            state._load_ad_models(checkpoint, DEVICE)
+        except Exception as e:
+            print(f"[AD] _load_ad_models failed: {e}")
 
     print("Warming up YOLO (dummy inference)...")
     dummy = np.zeros((640, 640, 3), dtype=np.uint8)
@@ -120,7 +129,7 @@ def video_feed():
                    b'Content-Type: image/jpeg\r\n'
                    b'Content-Length: ' + str(len(frame_bytes)).encode() + b'\r\n\r\n'
                    + frame_bytes + b'\r\n')
-            time.sleep(0.033)
+            time.sleep(0.066) 
 
     return Response(
         generate(),
@@ -148,45 +157,20 @@ def api_stop():
 
 @app.route('/api/pause', methods=['POST'])
 def api_pause():
-    """Pause video playback (threads stay alive, cap stays open)."""
     return jsonify(state.pause_processing())
 
 
 @app.route('/api/resume', methods=['POST'])
 def api_resume():
-    """Resume from pause."""
     return jsonify(state.resume_processing())
-
-
-@app.route('/api/seek', methods=['POST'])
-def api_seek():
-    """Seek video to a position. Body: {"position": 50} (0-100%)."""
-    data = request.get_json() or {}
-    pct = data.get('position', 0)
-    return jsonify(state.seek_video(pct))
-
-
-@app.route('/api/speed', methods=['POST'])
-def api_speed():
-    """Set playback speed. Body: {"speed": 1.0} (0.1–4.0)."""
-    data = request.get_json() or {}
-    speed = data.get('speed', 1.0)
-    return jsonify(state.set_playback_speed(speed))
-
-
-@app.route('/api/raw_mode', methods=['POST'])
-def api_raw_mode():
-    """Toggle raw mode (video without detection overlay)."""
-    state._raw_mode = not state._raw_mode
-    mode = "raw" if state._raw_mode else "detection"
-    print(f'[RAW MODE] {mode}')
-    return jsonify({"raw_mode": state._raw_mode})
 
 
 @app.route('/api/stats')
 def api_stats():
     with state._stats_lock:
         s = dict(state.stats)
+    with state._perf_lock:
+        perf = dict(state._perf)
     # Enrich with active checkpoint + camera
     s["checkpoint_id"]    = current_checkpoint_id
     s["checkpoint_label"] = (state.current_checkpoint or {}).get("label", "")
@@ -195,20 +179,92 @@ def api_stats():
     s["exit_line_enabled"] = state._exit_line_enabled
     s["exit_line_vertical"] = state._exit_line_vertical
     s["exit_line_inverted"] = state._exit_line_inverted
-    s["rotation_deg"] = (state._rotation_steps % 4) * 90
-    # Current exit line as % from leading edge (for slider sync)
     s["exit_line_pct"] = state._exit_line_pct
-    # Video playback info
-    s["paused"] = state._paused
-    s["playback_speed"] = state._playback_speed
-    s["raw_mode"] = state._raw_mode
-    s["is_video_file"] = state._is_video_file
-    s["video_pos_frames"] = state._video_pos_frames
-    s["video_total_frames"] = state._video_total_frames
-    vfps = state._video_fps
-    s["video_pos_sec"] = round(state._video_pos_frames / vfps, 1) if vfps > 0 else 0
-    s["video_duration_sec"] = round(state._video_total_frames / vfps, 1) if vfps > 0 else 0
+    s["rotation_deg"] = (state._rotation_steps % 4) * 90
+    s["perf"] = perf
+    s["is_paused"] = getattr(state, '_is_paused', False)
+    s["stats_active"] = getattr(state, '_stats_active', False)
+    s["session_id"] = getattr(state, '_db_session_id', None)
+    s["db_available"] = state._db_writer is not None
+    s["db_backend"] = state._db_writer.backend if state._db_writer is not None else None
+    s["nok_no_barcode"] = getattr(state, '_nok_no_barcode', 0)
+    s["nok_no_date"] = getattr(state, '_nok_no_date', 0)
     return jsonify(s)
+
+
+@app.route('/api/perf')
+def api_perf():
+    with state._stats_lock:
+        stats = dict(state.stats)
+    with state._perf_lock:
+        perf = dict(state._perf)
+
+    return jsonify({
+        "checkpoint_id": current_checkpoint_id,
+        "checkpoint_mode": state.mode,
+        "is_running": state.is_running,
+        "frame_count": state.frame_count,
+        "video_fps": stats.get("video_fps", 0),
+        "det_fps": stats.get("det_fps", 0),
+        "inference_ms": stats.get("inference_ms", 0),
+        "perf": perf,
+    })
+
+
+@app.route('/api/stats/status')
+def api_stats_status():
+    total = state.total_packets
+    ok_count = state.output_fifo.count("OK")
+    nok_count = state.output_fifo.count("NOK")
+    return jsonify({
+        "stats_active": getattr(state, '_stats_active', False),
+        "session_id": getattr(state, '_db_session_id', None),
+        "db_available": state._db_writer is not None,
+        "db_backend": state._db_writer.backend if state._db_writer is not None else None,
+        "total": total,
+        "ok_count": ok_count,
+        "nok_count": nok_count,
+        "nok_no_barcode": getattr(state, '_nok_no_barcode', 0),
+        "nok_no_date": getattr(state, '_nok_no_date', 0),
+        "nok_rate_pct": round(nok_count / total * 100, 2) if total > 0 else 0.0,
+    })
+
+
+@app.route('/api/stats/toggle', methods=['POST'])
+def api_stats_toggle():
+    request.get_json(force=True, silent=True)
+    result = state.set_stats_recording(not getattr(state, '_stats_active', False))
+    result["db_available"] = state._db_writer is not None
+    result["db_backend"] = state._db_writer.backend if state._db_writer is not None else None
+    return jsonify(result)
+
+
+@app.route('/api/stats/sessions')
+def api_stats_sessions():
+    limit = request.args.get('limit', default=50, type=int)
+    if state._db_writer is None:
+        return jsonify({"sessions": []})
+    sessions = state._db_writer.list_sessions(limit=max(1, min(limit, 500)))
+    return jsonify({"sessions": sessions})
+
+
+@app.route('/api/stats/session/<session_id>')
+def api_stats_session(session_id):
+    if state._db_writer is None:
+        return jsonify({}), 404
+    data = state._db_writer.get_session_kpis(session_id)
+    if not data:
+        return jsonify({}), 404
+    return jsonify(data)
+
+
+@app.route('/api/stats/session/<session_id>/snapshots')
+def api_stats_session_snapshots(session_id):
+    if state._db_writer is None:
+        return jsonify({"snapshots": []})
+    limit = request.args.get('limit', default=500, type=int)
+    rows = state._db_writer.list_snapshots(session_id, limit=max(1, min(limit, 5000)))
+    return jsonify({"snapshots": rows})
 
 
 @app.route('/api/config', methods=['GET', 'POST'])
@@ -256,7 +312,7 @@ def api_exit_line():
 def api_exit_line_orientation():
     """Toggle exit line between horizontal (False) and vertical (True)."""
     state._exit_line_vertical = not state._exit_line_vertical
-    state._recompute_exit_line_y()  # recompute with new ref dimension
+    state._recompute_exit_line_y()
     orientation = "vertical" if state._exit_line_vertical else "horizontal"
     print(f'[EXIT LINE] Orientation set to {orientation}')
     return jsonify({"vertical": state._exit_line_vertical, "orientation": orientation})
@@ -264,35 +320,31 @@ def api_exit_line_orientation():
 
 @app.route('/api/exit_line_invert', methods=['POST'])
 def api_exit_line_invert():
-    """Toggle direction: % measured from near edge (False) or far edge (True).
-    Use this when the conveyor moves in the opposite direction so that the
-    slider value makes intuitive sense (e.g. 85% from the right instead of left).
+    """Toggle direction: % from near edge (False) or far edge (True).
+    Use when conveyor runs right-to-left so the slider value stays intuitive.
     """
     state._exit_line_inverted = not state._exit_line_inverted
     state._recompute_exit_line_y()
-    inv = state._exit_line_inverted
-    print(f'[EXIT LINE] Direction inverted={inv}')
-    return jsonify({"inverted": inv})
+    print(f'[EXIT LINE] Direction inverted={state._exit_line_inverted}')
+    return jsonify({"inverted": state._exit_line_inverted})
 
 
 @app.route('/api/exit_line_position', methods=['POST'])
 def api_exit_line_position():
-    """Set exit line position as % from top (0–100). Updates live without restart."""
+    """Set exit line position as % from leading edge (5–95). Updates live without restart."""
     data = request.get_json() or {}
     pct = data.get('position', 85)
     try:
         pct = max(5, min(95, int(pct)))
     except (TypeError, ValueError):
-        return jsonify({'error': 'position must be an integer 0-100'}), 400
+        return jsonify({'error': 'position must be an integer 5-95'}), 400
 
-    # Update config ratio + live state percentage
     CONFIG['exit_line_ratio'] = round(1.0 - pct / 100.0, 4)
     state._exit_line_pct = pct
 
-    # Apply immediately if video is running (frame height known), else queued for next Start
     if state._frame_height > 0:
         state._recompute_exit_line_y()
-        print(f'[EXIT LINE] Position set to {pct}% (y/x={state._exit_line_y}, rot={state._rotation_steps*90}\u00b0 CCW)')
+        print(f'[EXIT LINE] Position set to {pct}% (y/x={state._exit_line_y}, rot={state._rotation_steps * 90}° CCW)')
     else:
         print(f'[EXIT LINE] Position queued at {pct}% (will apply on next Start)')
     return jsonify({'position_pct': pct, 'exit_line_y': state._exit_line_y})

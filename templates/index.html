@@ -62,6 +62,10 @@
         }
         .btn-start { background: #238636; color: #fff; }
         .btn-start:hover { background: #2ea043; }
+        .btn-pause { background: #9e6a03; color: #fff; }
+        .btn-pause:hover { background: #d29922; }
+        .btn-resume { background: #1f6feb; color: #fff; }
+        .btn-resume:hover { background: #388bfd; }
         .btn-exit-on  { background: #1f6feb; color: #fff; }
         .btn-exit-on:hover  { background: #388bfd; }
         .btn-exit-off { background: #484f58; color: #e6edf3; }
@@ -70,18 +74,30 @@
         .btn-rot:hover { background: #8250df; }
         .btn-stop { background: #da3633; color: #fff; }
         .btn-stop:hover { background: #f85149; }
-        .btn-resume { background: #1f6feb; color: #fff; }
-        .btn-resume:hover { background: #388bfd; }
-        .btn-stop:disabled, .btn-resume:disabled { opacity: 0.4; cursor: not-allowed; }
 
-        /* Speed buttons */
-        .speed-btn {
-            background: #21262d; border: 1px solid #30363d; color: #8b949e;
-            border-radius: 4px; padding: 3px 8px; cursor: pointer; font-size: 0.75em;
-            font-weight: 600; transition: all 0.15s;
+        .exit-line-row {
+            display: flex; align-items: center; gap: 10px;
+            background: #161b22; padding: 8px 14px; border-radius: 8px;
+            border: 1px solid #30363d; flex-wrap: wrap;
         }
-        .speed-btn:hover { border-color: #58a6ff; color: #c9d1d9; }
-        .speed-btn.speed-active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+        .exit-line-row .axis-label {
+            font-size: 0.72em; color: #8b949e; white-space: nowrap;
+            text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .exit-line-row input[type="range"] {
+            flex: 1; min-width: 140px; cursor: pointer;
+            accent-color: #58a6ff;
+        }
+        .exit-line-row .pct-label {
+            font-size: 0.85em; font-weight: 600; color: #58a6ff;
+            min-width: 38px; text-align: right;
+        }
+        .btn-exit-sub {
+            background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+            border-radius: 6px; padding: 4px 10px; cursor: pointer;
+            font-size: 0.8em; white-space: nowrap;
+        }
+        .btn-exit-sub:hover { border-color: #58a6ff; }
 
         .switching-overlay {
             display: none; position: fixed; inset: 0; z-index: 999;
@@ -172,30 +188,44 @@
         }
         .status-dot.running { background: #3fb950; animation: pulse 1.5s infinite; }
         .status-dot.ended   { background: #d29922; }
+        .status-dot.paused  { background: #9e6a03; }
         @keyframes pulse {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.4; }
         }
 
-        /* ── Toast notifications ── */
-        #toast-container {
-            position: fixed; bottom: 24px; right: 24px;
-            display: flex; flex-direction: column; gap: 8px;
-            z-index: 9999; pointer-events: none;
+        .db-btn {
+            display: block; width: 100%; padding: 8px 12px; border: none;
+            border-radius: 6px; font-size: 0.82em; font-weight: 600;
+            cursor: pointer; text-align: center;
         }
-        .toast {
-            padding: 10px 18px; border-radius: 8px; font-size: 0.85em;
-            font-weight: 600; opacity: 0; transform: translateX(40px);
-            transition: opacity 0.3s, transform 0.3s;
-            pointer-events: none; max-width: 320px;
+        .db-btn-record-on { background: #238636; color: #fff; }
+        .db-btn-record-off { background: #484f58; color: #e6edf3; }
+        .db-backend-badge {
+            display: inline-block; font-size: 0.68em; padding: 1px 7px;
+            border-radius: 8px; font-weight: 600; vertical-align: middle; margin-left: 6px;
         }
-        .toast.show { opacity: 1; transform: translateX(0); }
-        .toast-info    { background: #1f3a5f; border: 1px solid #58a6ff; color: #58a6ff; }
-        .toast-success { background: #0d2818; border: 1px solid #3fb950; color: #3fb950; }
-        .toast-warn    { background: #3d2a00; border: 1px solid #d29922; color: #d29922; }
-        .toast-error   { background: #3d1114; border: 1px solid #f85149; color: #f85149; }
+        .db-backend-sqlite { background: #3d2a00; color: #d29922; border: 1px solid #9e6a03; }
+        .db-backend-postgres { background: #0d2818; color: #3fb950; border: 1px solid #238636; }
+        .db-mini-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+        .db-mini-item {
+            background: #0d1117; border: 1px solid #21262d; border-radius: 6px;
+            padding: 7px 4px; text-align: center;
+        }
+        .db-mini-val { font-size: 1.2em; font-weight: 700; color: #f85149; }
+        .db-mini-label { font-size: 0.64em; color: #8b949e; margin-top: 2px; }
+        .db-session-id {
+            font-size: 0.68em; color: #8b949e; word-break: break-all;
+            margin: 8px 0; padding: 6px 8px; background: #0d1117;
+            border-radius: 4px; border: 1px solid #21262d;
+        }
+        .btn-sessions {
+            margin-top: 8px; background: #1f6feb; color: #fff;
+            border: none; border-radius: 6px; padding: 8px 10px;
+            cursor: pointer; width: 100%; font-size: 0.82em; font-weight: 600;
+        }
+        .btn-sessions:hover { background: #388bfd; }
 
-        /* ── Thresholds modal ── */
         .modal-backdrop {
             display: none; position: fixed; inset: 0; z-index: 1000;
             background: rgba(0,0,0,0.65); align-items: center; justify-content: center;
@@ -203,60 +233,34 @@
         .modal-backdrop.open { display: flex; }
         .modal {
             background: #161b22; border: 1px solid #30363d; border-radius: 12px;
-            padding: 24px 28px; min-width: 380px; max-width: 480px; width: 90%;
+            padding: 18px 20px; min-width: 560px; max-width: 860px; width: 92%;
             box-shadow: 0 8px 32px rgba(0,0,0,0.6);
         }
-        .modal h2 { font-size: 1em; color: #58a6ff; margin-bottom: 18px; letter-spacing: 0.3px; }
-        .modal-section { font-size: 0.7em; color: #8b949e; text-transform: uppercase;
-            letter-spacing: 0.6px; margin: 14px 0 8px; border-bottom: 1px solid #21262d; padding-bottom: 4px; }
-        .modal-row {
-            display: flex; align-items: center; justify-content: space-between;
-            gap: 12px; margin-bottom: 10px;
+        .modal h2 { font-size: 1em; color: #58a6ff; margin-bottom: 12px; }
+        .btn-modal-close {
+            background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+            border-radius: 6px; padding: 7px 14px; cursor: pointer; font-size: 0.85em;
         }
-        .modal-row label { font-size: 0.83em; color: #c9d1d9; flex: 1; }
-        .modal-row input[type=number] {
-            width: 90px; padding: 5px 8px; font-size: 0.85em;
-            background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
-            color: #e6edf3; outline: none; text-align: right;
+        .btn-modal-close:hover { border-color: #58a6ff; }
+        .session-row {
+            padding: 8px 10px; border: 1px solid #30363d; border-radius: 6px;
+            background: #0d1117; cursor: pointer;
         }
-        .modal-row input[type=number]:focus { border-color: #58a6ff; }
-        .modal-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
-        .btn-modal-cancel { background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
-            border-radius: 6px; padding: 7px 18px; cursor: pointer; font-size: 0.85em; }
-        .btn-modal-cancel:hover { border-color: #8b949e; }
-        .btn-modal-apply  { background: #238636; border: none; color: #fff;
-            border-radius: 6px; padding: 7px 20px; cursor: pointer; font-size: 0.85em; font-weight: 600; }
-        .btn-modal-apply:hover  { background: #2ea043; }
-        .btn-settings { background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
-            border-radius: 6px; padding: 8px 14px; cursor: pointer; font-size: 13px;
-            font-weight: 600; white-space: nowrap; }
-        .btn-settings:hover { border-color: #58a6ff; color: #58a6ff; }
-
-        /* ── DB Stats panel buttons ── */
-        .db-btn {
-            display: block; width: 100%; padding: 7px 12px; border: none;
-            border-radius: 6px; font-size: 0.82em; font-weight: 600;
-            cursor: pointer; text-align: center; transition: opacity 0.15s;
+        .session-row:hover { border-color: #58a6ff; }
+        .session-row.active { border-color: #3fb950; }
+        .session-id-mini {
+            font-size: 0.7em; color: #8b949e; margin-top: 4px;
+            word-break: break-all;
         }
-        .db-btn:hover { opacity: 0.85; }
-        .db-btn-record-on  { background: #238636; color: #fff; }
-        .db-btn-record-off { background: #484f58; color: #e6edf3; }
-        .db-btn-reset  { background: #9e3a26; color: #fff; }
-        .db-btn-export { background: #1f6feb; color: #fff; flex: 1; }
-        .db-backend-badge {
-            display: inline-block; font-size: 0.68em; padding: 1px 7px;
-            border-radius: 8px; font-weight: 600; vertical-align: middle; margin-left: 6px;
+        .session-kpi-grid {
+            display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;
         }
-        .db-backend-sqlite   { background: #3d2a00; color: #d29922; border: 1px solid #9e6a03; }
-        .db-backend-postgres { background: #0d2818; color: #3fb950; border: 1px solid #238636; }
-        .db-nok-breakdown { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-bottom: 8px; }
-        .db-nok-item { background: #0d1117; border: 1px solid #21262d; border-radius: 6px;
-            padding: 7px 4px; text-align: center; }
-        .db-nok-val   { font-size: 1.3em; font-weight: 700; color: #f85149; }
-        .db-nok-label { font-size: 0.65em; color: #8b949e; margin-top: 2px; }
-        .db-session-id { font-size: 0.68em; color: #484f58; word-break: break-all;
-            margin-bottom: 8px; padding: 4px 6px; background: #0d1117;
-            border-radius: 4px; border: 1px solid #21262d; }
+        .session-kpi-card {
+            background: #0d1117; border: 1px solid #21262d; border-radius: 6px;
+            padding: 8px; text-align: center;
+        }
+        .session-kpi-val { font-size: 1.25em; font-weight: 700; }
+        .session-kpi-label { font-size: 0.68em; color: #8b949e; margin-top: 2px; }
     </style>
 </head>
 <body>
@@ -358,32 +362,26 @@
                 title="Leave empty to use the selected camera above"
                 onkeydown="if(event.key==='Enter') startTracking()">
             <button class="btn-start" onclick="startTracking()">&#9654; Start</button>
-            <button id="btnPause" class="btn-stop" onclick="togglePause()" disabled>&#10074;&#10074; Pause</button>
+            <button id="btnPause"  class="btn-pause"  onclick="pauseTracking()"  style="display:none">&#9646;&#9646; Pause</button>
+            <button id="btnResume" class="btn-resume" onclick="resumeTracking()" style="display:none">&#9654; Resume</button>
+            <button class="btn-stop"  onclick="stopTracking()">&#9632; Stop</button>
             <button id="btnExitLine" class="btn-exit-on" onclick="toggleExitLine()" title="Toggle exit line">&#9135; Exit Line: ON</button>
             <button id="btnRotate" class="btn-rot" onclick="rotateInput90()" title="Rotate input 90° counter-clockwise">&#8634; Rotate: 0°</button>
-            <button class="btn-settings" onclick="openThreshModal()" title="Configure detection thresholds">&#9881; Thresholds</button>
         </div>
 
-        <!-- ── Exit line position slider ── -->
-        <div style="display:flex; align-items:center; gap:12px; background:#161b22;
-                    padding:8px 14px; border-radius:8px; border:1px solid #30363d;">
-            <span id="exitLineAxisLabel" style="font-size:0.75em; color:#8b949e; white-space:nowrap; text-transform:uppercase; letter-spacing:0.5px;">Exit Line &mdash; % from top</span>
-            <input type="range" id="exitLineSlider" min="10" max="95" value="85" step="1"
-                style="flex:1; accent-color:#58a6ff; cursor:pointer;"
+        <div class="exit-line-row">
+            <span id="exitLineAxisLabel" class="axis-label">Exit line % from top</span>
+            <input type="range" id="exitLineSlider" min="5" max="95" value="85" step="1"
                 oninput="onExitLineSliderInput(this.value)"
                 onchange="onExitLineSliderCommit(this.value)">
-            <span id="exitLinePctLabel" style="font-size:0.85em; font-weight:600; color:#58a6ff; min-width:38px; text-align:right;">85%</span>
-            <button id="btnExitLineOrient" onclick="toggleExitLineOrientation()"
-                title="Toggle exit line between horizontal and vertical"
-                style="background:#21262d; border:1px solid #30363d; color:#c9d1d9; border-radius:6px;
-                       padding:4px 10px; cursor:pointer; font-size:0.8em; white-space:nowrap;">
-                &#11020; Horizontal
+            <span id="exitLinePctLabel" class="pct-label">85%</span>
+            <button id="btnExitLineOrient" class="btn-exit-sub" data-vertical="0"
+                onclick="toggleExitLineOrientation()" title="Toggle horizontal/vertical exit line">
+                Orientation: Horizontal
             </button>
-            <button id="btnExitLineInvert" onclick="toggleExitLineInvert()"
-                title="Flip direction: measure % from opposite edge (use when conveyor moves in reverse direction)"
-                style="background:#21262d; border:1px solid #30363d; color:#8b949e; border-radius:6px;
-                       padding:4px 10px; cursor:pointer; font-size:0.8em; white-space:nowrap;">
-                &#8646; Normal
+            <button id="btnExitLineInvert" class="btn-exit-sub" data-inverted="0"
+                onclick="toggleExitLineInvert()" title="Flip line direction for opposite conveyor flow">
+                Direction: Normal
             </button>
         </div>
 
@@ -473,66 +471,54 @@
             <div class="fifo-box" id="fifo" style="flex:1;">(empty)</div>
         </div>
 
-        <!-- ── DB Recording panel ── -->
-        <!-- <div class="panel" id="dbPanel">
+        <div class="panel">
             <h3 style="display:flex; align-items:center;">
                 DB Recording
                 <span id="dbBackendBadge" class="db-backend-badge db-backend-sqlite">SQLite</span>
-            </h3> -->
-
-            <!-- NOK breakdown (only meaningful when session active) -->
-            <!-- <div class="db-nok-breakdown">
-                <div class="db-nok-item">
-                    <div class="db-nok-val" id="db-nok-barcode">&#8212;</div>
-                    <div class="db-nok-label">No Barcode</div>
+            </h3>
+            <div class="db-mini-grid">
+                <div class="db-mini-item">
+                    <div class="db-mini-val" id="dbNoBarcode">0</div>
+                    <div class="db-mini-label">No Barcode</div>
                 </div>
-                <div class="db-nok-item">
-                    <div class="db-nok-val" id="db-nok-date">&#8212;</div>
-                    <div class="db-nok-label">No Date</div>
+                <div class="db-mini-item">
+                    <div class="db-mini-val" id="dbNoDate">0</div>
+                    <div class="db-mini-label">No Date</div>
                 </div>
-                <div class="db-nok-item">
-                    <div class="db-nok-val" id="db-nok-both" style="color:#d29922;">&#8212;</div>
-                    <div class="db-nok-label">Both</div>
-                </div>
-            </div> -->
-
-            <!-- Session timing -->
-            <!-- <div class="db-session-id" id="dbSessionInfo">No active session</div> -->
-
-            <!-- NOK rate -->
-            <!-- <div style="display:flex; justify-content:space-between; font-size:0.78em; color:#8b949e; margin-bottom:10px;">
-                <span>NOK rate</span>
-                <span id="dbNokRate" style="color:#8b949e; font-weight:700;">&#8212;</span>
-            </div> -->
-
-            <!-- Action buttons -->
-            <!-- <div style="display:flex; flex-direction:column; gap:6px;">
-                <button id="btnStatsToggle" class="db-btn db-btn-record-off" onclick="toggleStatsRecording()">
-                    &#9210; Recording: OFF
-                </button>
-                <div style="display:flex; gap:6px;">
-                    <button class="db-btn db-btn-export" onclick="openSessionPicker('csv')" title="Export a session as CSV">
-                        &#8659; CSV
-                    </button>
-                    <button class="db-btn db-btn-export" onclick="openSessionPicker('json')" title="Export a session as JSON">
-                        &#8659; JSON
-                    </button>
-                </div>
-            </div> -->
-        <!-- </div> -->
+            </div>
+            <div class="db-session-id" id="dbSessionInfo">Recording OFF</div>
+            <button id="btnStatsToggle" class="db-btn db-btn-record-off" onclick="toggleStatsRecording()">
+                Recording: OFF
+            </button>
+                        <button class="btn-sessions" onclick="openSessionsModal()">View Saved Sessions</button>
+        </div>
     </div>
 </div>
 
-<!-- ── Session Picker Modal ── -->
-<div class="modal-backdrop" id="sessionPickerModal" onclick="_sessionModalBgClick(event)">
-  <div class="modal" id="sessionPickerBox" style="min-width:500px; max-width:680px;">
-    <h2 id="sessionPickerTitle">&#8659; Export Session — CSV</h2>
-    <p style="font-size:0.8em; color:#8b949e; margin-bottom:14px;">Select a session to download. Showing the last 50 sessions.</p>
-    <div id="sessionPickerList" style="max-height:340px; overflow-y:auto; display:flex; flex-direction:column; gap:6px;">
-        <div style="color:#484f58; font-size:0.85em; text-align:center; padding:20px 0;">Loading…</div>
-    </div>
-    <div class="modal-footer" style="margin-top:16px;">
-        <button class="btn-modal-cancel" onclick="closeSessionPicker()">Close</button>
+<div class="modal-backdrop" id="sessionsModal" onclick="if(event.target===this) closeSessionsModal()">
+    <div class="modal">
+        <h2>Saved Sessions</h2>
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+            <div>
+                <div id="sessionsList" style="max-height:360px; overflow-y:auto; display:flex; flex-direction:column; gap:6px;">
+                    <div style="color:#8b949e; font-size:0.85em;">Loading…</div>
+                </div>
+            </div>
+            <div>
+                <div id="sessionDetailHeader" style="font-size:0.82em; color:#8b949e; margin-bottom:8px;">Select a session</div>
+                <div class="session-kpi-grid">
+                    <div class="session-kpi-card"><div class="session-kpi-val c-total" id="sdTotal">0</div><div class="session-kpi-label">Total</div></div>
+                    <div class="session-kpi-card"><div class="session-kpi-val c-ok" id="sdOk">0</div><div class="session-kpi-label">OK</div></div>
+                    <div class="session-kpi-card"><div class="session-kpi-val c-nok" id="sdNok">0</div><div class="session-kpi-label">NOK</div></div>
+                    <div class="session-kpi-card"><div class="session-kpi-val c-nok" id="sdNoBarcode">0</div><div class="session-kpi-label">No Barcode</div></div>
+                    <div class="session-kpi-card"><div class="session-kpi-val c-def" id="sdNoDate">0</div><div class="session-kpi-label">No Date</div></div>
+                    <div class="session-kpi-card"><div class="session-kpi-val c-ms" id="sdNokRate">0%</div><div class="session-kpi-label">NOK Rate</div></div>
+                </div>
+            </div>
+        </div>
+        <div style="display:flex; justify-content:flex-end; margin-top:12px;">
+            <button class="btn-modal-close" onclick="closeSessionsModal()">Close</button>
+        </div>
     </div>
   </div>
 </div>
@@ -556,6 +542,7 @@
 
     /* ─── Exit line toggle ─── */
     let exitLineEnabled = true;
+    let _exitLineSliderTimer = null;
 
     async function toggleExitLine() {
         const r = await fetch('/api/exit_line', { method: 'POST' });
@@ -578,88 +565,59 @@
         document.getElementById('btnRotate').textContent = '\u21b6 Rotate: ' + deg + '\u00b0';
     }
 
-    let _exitLineSliderTimer = null;
-
     function onExitLineSliderInput(val) {
-        // Update label immediately while dragging (no API call yet)
         document.getElementById('exitLinePctLabel').textContent = val + '%';
     }
 
     function onExitLineSliderCommit(val) {
-        // Called on mouseup/touchend — send to server
         document.getElementById('exitLinePctLabel').textContent = val + '%';
-        const isVert     = document.getElementById('btnExitLineOrient').dataset.vertical === '1';
-        const isInverted = document.getElementById('btnExitLineInvert').dataset.inverted === '1';
         clearTimeout(_exitLineSliderTimer);
         _exitLineSliderTimer = setTimeout(() => {
             fetch('/api/exit_line_position', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ position: parseInt(val) }),
-            })
-            .then(r => r.json())
-            .then(d => {
-                let dir;
-                if (isVert)  dir = isInverted ? 'right' : 'left';
-                else         dir = isInverted ? 'bottom' : 'top';
-                showToast('Exit line → ' + val + '% from ' + dir, 'info', 1500);
-            })
-            .catch(e => showToast('Error: ' + e, 'error'));
-        }, 50);
+                body: JSON.stringify({ position: parseInt(val, 10) }),
+            }).catch((e) => console.error('exit line position failed:', e));
+        }, 40);
     }
 
     async function toggleExitLineOrientation() {
         const r = await fetch('/api/exit_line_orientation', { method: 'POST' });
         const d = await r.json();
-        _applyExitLineOrient(d.vertical);
+        _applyExitLineOrient(!!d.vertical);
         _updateAxisLabel();
-        showToast('Exit line → ' + d.orientation, 'info', 1500);
     }
 
     async function toggleExitLineInvert() {
         const r = await fetch('/api/exit_line_invert', { method: 'POST' });
         const d = await r.json();
-        _applyExitLineInvert(d.inverted);
+        _applyExitLineInvert(!!d.inverted);
         _updateAxisLabel();
-        const msg = d.inverted ? 'Direction flipped (% from far edge)' : 'Direction normal (% from near edge)';
-        showToast(msg, 'info', 2000);
     }
 
     function _applyExitLineOrient(isVertical) {
         const btn = document.getElementById('btnExitLineOrient');
         btn.dataset.vertical = isVertical ? '1' : '0';
-        if (isVertical) {
-            btn.innerHTML = '&#11021; Vertical';
-            btn.style.color = '#f0883e';
-        } else {
-            btn.innerHTML = '&#11020; Horizontal';
-            btn.style.color = '#c9d1d9';
-        }
+        btn.textContent = isVertical ? 'Orientation: Vertical' : 'Orientation: Horizontal';
+        btn.style.color = isVertical ? '#f0883e' : '#c9d1d9';
     }
 
     function _applyExitLineInvert(isInverted) {
         const btn = document.getElementById('btnExitLineInvert');
         btn.dataset.inverted = isInverted ? '1' : '0';
-        if (isInverted) {
-            btn.innerHTML = '&#8646; Flipped';
-            btn.style.color = '#f0883e';
-            btn.style.borderColor = '#f0883e';
-        } else {
-            btn.innerHTML = '&#8646; Normal';
-            btn.style.color = '#8b949e';
-            btn.style.borderColor = '#30363d';
-        }
+        btn.textContent = isInverted ? 'Direction: Inverted' : 'Direction: Normal';
+        btn.style.color = isInverted ? '#f0883e' : '#c9d1d9';
+        btn.style.borderColor = isInverted ? '#f0883e' : '#30363d';
     }
 
     function _updateAxisLabel() {
-        const isVert     = document.getElementById('btnExitLineOrient').dataset.vertical === '1';
-        const isInverted = document.getElementById('btnExitLineInvert').dataset.inverted === '0' ? false
-                         : (document.getElementById('btnExitLineInvert').dataset.inverted === '1');
+        const isVertical = document.getElementById('btnExitLineOrient').dataset.vertical === '1';
+        const isInverted = document.getElementById('btnExitLineInvert').dataset.inverted === '1';
         const label = document.getElementById('exitLineAxisLabel');
-        if (isVert) {
-            label.textContent = 'Exit Line \u2014 % from ' + (isInverted ? 'right' : 'left');
+        if (isVertical) {
+            label.textContent = 'Exit line % from ' + (isInverted ? 'right' : 'left');
         } else {
-            label.textContent = 'Exit Line \u2014 % from ' + (isInverted ? 'bottom' : 'top');
+            label.textContent = 'Exit line % from ' + (isInverted ? 'bottom' : 'top');
         }
     }
 
@@ -667,6 +625,108 @@
     let activeCheckpointId = null;
     let activeCameraId     = null;
     let isSwitching        = false;
+
+    async function toggleStatsRecording() {
+        const r = await fetch('/api/stats/toggle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        });
+        const d = await r.json();
+        applyStatsRecordingState(d.stats_active, d.session_id, d.db_available, d.db_backend);
+    }
+
+    function applyStatsRecordingState(isActive, sessionId, dbAvailable, backend) {
+        const btn = document.getElementById('btnStatsToggle');
+        const info = document.getElementById('dbSessionInfo');
+        const badge = document.getElementById('dbBackendBadge');
+        if (dbAvailable) {
+            const isPg = backend === 'postgres';
+            badge.textContent = isPg ? 'Postgres' : 'SQLite';
+            badge.className = 'db-backend-badge ' + (isPg ? 'db-backend-postgres' : 'db-backend-sqlite');
+        } else {
+            badge.textContent = 'Unavailable';
+            badge.className = 'db-backend-badge db-backend-sqlite';
+        }
+        btn.textContent = isActive ? 'Recording: ON' : 'Recording: OFF';
+        btn.className = 'db-btn ' + (isActive ? 'db-btn-record-on' : 'db-btn-record-off');
+        info.textContent = isActive ? ('Session: ' + (sessionId || 'pending')) : 'Recording OFF';
+    }
+
+    function closeSessionsModal() {
+        document.getElementById('sessionsModal').classList.remove('open');
+    }
+
+    async function openSessionsModal() {
+        document.getElementById('sessionsModal').classList.add('open');
+        const list = document.getElementById('sessionsList');
+        list.innerHTML = '<div style="color:#8b949e; font-size:0.85em;">Loading…</div>';
+
+        try {
+            const r = await fetch('/api/stats/sessions?limit=100');
+            const d = await r.json();
+            const sessions = d.sessions || [];
+            if (!sessions.length) {
+                list.innerHTML = '<div style="color:#8b949e; font-size:0.85em;">No saved sessions yet.</div>';
+                return;
+            }
+
+            list.innerHTML = '';
+            sessions.forEach((s, idx) => {
+                const total = Number(s.total || 0);
+                const ok = Number(s.ok_count || 0);
+                const nok = Math.max(0, total - ok);
+                const row = document.createElement('div');
+                row.className = 'session-row';
+                row.innerHTML =
+                    '<div style="display:flex; justify-content:space-between; gap:8px;">' +
+                        '<strong style="font-size:0.82em; color:#c9d1d9;">' + (s.started_at || 'unknown') + '</strong>' +
+                        '<span style="font-size:0.76em; color:#58a6ff;">T:' + total + ' OK:' + ok + ' NOK:' + nok + '</span>' +
+                    '</div>' +
+                    '<div class="session-id-mini">' + s.id + '</div>';
+
+                row.onclick = async () => {
+                    document.querySelectorAll('.session-row').forEach(el => el.classList.remove('active'));
+                    row.classList.add('active');
+                    await loadSessionDetails(s.id);
+                };
+
+                list.appendChild(row);
+
+                if (idx === 0) {
+                    row.classList.add('active');
+                    loadSessionDetails(s.id);
+                }
+            });
+        } catch (e) {
+            list.innerHTML = '<div style="color:#f85149; font-size:0.85em;">Failed to load sessions: ' + e + '</div>';
+        }
+    }
+
+    async function loadSessionDetails(sessionId) {
+        try {
+            const r = await fetch('/api/stats/session/' + encodeURIComponent(sessionId));
+            if (!r.ok) throw new Error('session not found');
+            const s = await r.json();
+            const total = Number(s.total || 0);
+            const ok = Number(s.ok_count || 0);
+            const nok = Math.max(0, total - ok);
+            const nb = Number(s.nok_no_barcode || 0);
+            const nd = Number(s.nok_no_date || 0);
+            const rate = total > 0 ? ((nok / total) * 100).toFixed(2) : '0.00';
+
+            document.getElementById('sessionDetailHeader').textContent =
+                'Session: ' + sessionId + ' | Start: ' + (s.started_at || '-');
+            document.getElementById('sdTotal').textContent = total;
+            document.getElementById('sdOk').textContent = ok;
+            document.getElementById('sdNok').textContent = nok;
+            document.getElementById('sdNoBarcode').textContent = nb;
+            document.getElementById('sdNoDate').textContent = nd;
+            document.getElementById('sdNokRate').textContent = rate + '%';
+        } catch (e) {
+            document.getElementById('sessionDetailHeader').textContent = 'Failed to load session details';
+        }
+    }
 
     /* ─── Bootstrap: load checkpoints + cameras ─── */
     async function loadSelectors() {
@@ -926,8 +986,17 @@
         }
     }
 
-    /* ─── Track video_ended transitions ─── */
-    let _videoEndedNotified = false;
+    function pauseTracking() {
+        fetch('/api/pause', { method: 'POST' })
+            .then(r => r.json())
+            .then(d => console.log('Paused:', d));
+    }
+
+    function resumeTracking() {
+        fetch('/api/resume', { method: 'POST' })
+            .then(r => r.json())
+            .then(d => console.log('Resumed:', d));
+    }
 
     /* ─── Poll stats ─── */
     function updateStats() {
@@ -954,77 +1023,30 @@
                 btn.className   = exitLineEnabled ? 'btn-exit-on'      : 'btn-exit-off';
             }
 
-            // Sync exit line slider with server (only when not actively dragging)
-            if (typeof d.exit_line_pct !== 'undefined' && document.activeElement !== document.getElementById('exitLineSlider')) {
-                const slider = document.getElementById('exitLineSlider');
-                const label  = document.getElementById('exitLinePctLabel');
-                if (slider && parseInt(slider.value) !== d.exit_line_pct) {
-                    slider.value = d.exit_line_pct;
-                    label.textContent = d.exit_line_pct + '%';
-                }
-            }
-            // Sync exit line orientation button
-            if (typeof d.exit_line_vertical !== 'undefined') {
-                const btn = document.getElementById('btnExitLineOrient');
-                const currentV = btn && btn.dataset.vertical === '1';
-                if (btn && currentV !== d.exit_line_vertical) {
-                    _applyExitLineOrient(d.exit_line_vertical);
-                }
-            }
-            // Sync exit line invert button
-            if (typeof d.exit_line_inverted !== 'undefined') {
-                const btn = document.getElementById('btnExitLineInvert');
-                const currentI = btn && btn.dataset.inverted === '1';
-                if (btn && currentI !== d.exit_line_inverted) {
-                    _applyExitLineInvert(d.exit_line_inverted);
-                }
-            }
-            _updateAxisLabel();
-
             if (typeof d.rotation_deg !== 'undefined') {
                 document.getElementById('btnRotate').textContent = '\u21b6 Rotate: ' + d.rotation_deg + '\u00b0';
             }
 
-            // ── Sync pause button ──
-            const btn_p = document.getElementById('btnPause');
-            if (d.is_running) {
-                btn_p.disabled = false;
-                if (d.paused !== _isPaused) {
-                    _isPaused = d.paused;
-                    _updatePauseBtn();
-                }
-            } else {
-                btn_p.disabled = true;
-                if (_isPaused) { _isPaused = false; _updatePauseBtn(); }
+            if (typeof d.exit_line_vertical !== 'undefined') {
+                _applyExitLineOrient(!!d.exit_line_vertical);
             }
+            if (typeof d.exit_line_inverted !== 'undefined') {
+                _applyExitLineInvert(!!d.exit_line_inverted);
+            }
+            if (typeof d.exit_line_pct !== 'undefined') {
+                const slider = document.getElementById('exitLineSlider');
+                const lbl = document.getElementById('exitLinePctLabel');
+                const pct = Number(d.exit_line_pct);
+                if (!Number.isNaN(pct) && String(slider.value) !== String(pct)) {
+                    slider.value = String(pct);
+                }
+                lbl.textContent = String(pct) + '%';
+            }
+            _updateAxisLabel();
 
-            // ── Sync video controls bar (show for video files) ──
-            const vcb = document.getElementById('videoControlsBar');
-            if (d.is_video_file && d.is_running) {
-                vcb.style.display = 'flex';
-                // Update timeline (only when not dragging)
-                if (!_timelineDragging) {
-                    const tl = document.getElementById('videoTimeline');
-                    const tlbl = document.getElementById('videoTimeLabel');
-                    const total = d.video_total_frames || 1;
-                    const pct = (d.video_pos_frames / total) * 1000;
-                    tl.value = Math.round(pct);
-                    const posSec = d.video_pos_sec || 0;
-                    const durSec = d.video_duration_sec || 0;
-                    tlbl.textContent = _fmtTime(posSec) + ' / ' + _fmtTime(durSec);
-                    tlbl.dataset.dur = durSec;
-                }
-                // Sync speed buttons
-                if (typeof d.playback_speed !== 'undefined') {
-                    _syncSpeedBtns(d.playback_speed);
-                }
-                // Sync raw mode button
-                if (typeof d.raw_mode !== 'undefined') {
-                    _applyRawMode(d.raw_mode);
-                }
-            } else if (!d.is_video_file) {
-                vcb.style.display = 'none';
-            }
+            applyStatsRecordingState(d.stats_active, d.session_id, d.db_available, d.db_backend);
+            document.getElementById('dbNoBarcode').textContent = d.nok_no_barcode || 0;
+            document.getElementById('dbNoDate').textContent = d.nok_no_date || 0;
 
             // Status dot
             const dot = document.getElementById('statusDot');
@@ -1037,10 +1059,17 @@
                 }
             } else if (d.is_running) {
                 dot.className = 'status-dot running'; txt.textContent = 'Processing…';
-                _videoEndedNotified = false;
+            } else if (d.is_paused) {
+                dot.className = 'status-dot paused'; txt.textContent = 'Paused';
             } else {
                 dot.className = 'status-dot'; txt.textContent = 'Idle';
             }
+
+            // Pause/Resume button visibility
+            const btnPause  = document.getElementById('btnPause');
+            const btnResume = document.getElementById('btnResume');
+            btnPause.style.display  = d.is_running ? '' : 'none';
+            btnResume.style.display = d.is_paused  ? '' : 'none';
 
             // FIFO
             const box = document.getElementById('fifo');
@@ -1316,7 +1345,7 @@
 
     /* ─── Init ─── */
     loadSelectors();
-    initDbBackendBadge();
+    _updateAxisLabel();
     setInterval(updateStats, 400);
     setInterval(pollDbStats, 2000);
 </script>

@@ -1,6 +1,8 @@
 """
 Helper functions for bounding box metrics.
 """
+import cv2
+import numpy as np
 
 
 def calculate_bbox_metrics(x1, y1, x2, y2):
