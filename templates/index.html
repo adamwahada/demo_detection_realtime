@@ -265,6 +265,61 @@
 </head>
 <body>
 
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<!-- Thresholds modal -->
+<div class="modal-backdrop" id="threshModal" onclick="_threshModalBgClick(event)">
+  <div class="modal" id="threshModalBox">
+    <h2>&#9881; Detection &amp; Tracker Thresholds</h2>
+
+    <div class="modal-section">Detection Confidence</div>
+    <div class="modal-row">
+      <label>Package confidence <span style="color:#8b949e;font-size:0.85em">(conf_paquet)</span></label>
+      <input type="number" id="cfg_conf_paquet" min="0.01" max="1" step="0.01">
+    </div>
+    <div class="modal-row">
+      <label>Barcode confidence <span style="color:#8b949e;font-size:0.85em">(conf_barcode)</span></label>
+      <input type="number" id="cfg_conf_barcode" min="0.01" max="1" step="0.01">
+    </div>
+    <div class="modal-row">
+      <label>Date confidence <span style="color:#8b949e;font-size:0.85em">(conf_date)</span></label>
+      <input type="number" id="cfg_conf_date" min="0.01" max="1" step="0.01">
+    </div>
+    <div class="modal-row">
+      <label>Inference size <span style="color:#8b949e;font-size:0.85em">(imgsz)</span></label>
+      <input type="number" id="cfg_imgsz" min="128" max="1280" step="32">
+    </div>
+
+    <div class="modal-section">ByteTrack Tracker</div>
+    <div class="modal-row">
+      <label>High thresh <span style="color:#8b949e;font-size:0.85em">(track_high_thresh)</span></label>
+      <input type="number" id="cfg_track_high_thresh" min="0.01" max="1" step="0.01">
+    </div>
+    <div class="modal-row">
+      <label>Low thresh <span style="color:#8b949e;font-size:0.85em">(track_low_thresh)</span></label>
+      <input type="number" id="cfg_track_low_thresh" min="0.01" max="1" step="0.01">
+    </div>
+    <div class="modal-row">
+      <label>New track thresh <span style="color:#8b949e;font-size:0.85em">(new_track_thresh)</span></label>
+      <input type="number" id="cfg_new_track_thresh" min="0.01" max="1" step="0.01">
+    </div>
+    <div class="modal-row">
+      <label>Match thresh <span style="color:#8b949e;font-size:0.85em">(match_thresh)</span></label>
+      <input type="number" id="cfg_match_thresh" min="0.01" max="1" step="0.01">
+    </div>
+    <div class="modal-row">
+      <label>Track buffer (frames) <span style="color:#8b949e;font-size:0.85em">(track_buffer)</span></label>
+      <input type="number" id="cfg_track_buffer" min="1" max="300" step="1">
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn-modal-cancel" onclick="closeThreshModal()">Cancel</button>
+      <button class="btn-modal-apply"  onclick="applyThresholds()">&#10003; Apply</button>
+    </div>
+  </div>
+</div>
+
 <!-- Switching overlay (shown while model is loading) -->
 <div class="switching-overlay" id="switchOverlay">
     <div class="spinner"></div>
@@ -337,6 +392,31 @@
                 <span class="stream-badge badge-video" id="badge-vfps">Video: 0 fps</span>
                 <span class="stream-badge badge-yolo"  id="badge-dfps">YOLO: 0 fps</span>
             </div>
+        </div>
+
+        <!-- ── Video playback controls (only useful for video files) ── -->
+        <div id="videoControlsBar" style="display:flex; align-items:center; gap:10px; background:#161b22;
+                    padding:8px 14px; border-radius:8px; border:1px solid #30363d; flex-wrap:wrap;">
+            <!-- Timeline -->
+            <span id="videoTimeLabel" style="font-size:0.8em; color:#8b949e; min-width:95px;">0:00 / 0:00</span>
+            <input type="range" id="videoTimeline" min="0" max="1000" value="0" step="1"
+                style="flex:1; accent-color:#f0883e; cursor:pointer; min-width:120px;"
+                oninput="onTimelineInput(this.value)"
+                onchange="onTimelineCommit(this.value)">
+            <!-- Speed buttons -->
+            <div style="display:flex; gap:4px;">
+                <button class="speed-btn" data-speed="0.25" onclick="setSpeed(0.25)">0.25x</button>
+                <button class="speed-btn" data-speed="0.5" onclick="setSpeed(0.5)">0.5x</button>
+                <button class="speed-btn speed-active" data-speed="1" onclick="setSpeed(1)">1x</button>
+                <button class="speed-btn" data-speed="2" onclick="setSpeed(2)">2x</button>
+            </div>
+            <!-- Raw mode toggle -->
+            <button id="btnRawMode" onclick="toggleRawMode()"
+                style="background:#21262d; border:1px solid #30363d; color:#c9d1d9; border-radius:6px;
+                       padding:4px 10px; cursor:pointer; font-size:0.8em; white-space:nowrap;"
+                title="Toggle between detection overlay and raw video">
+                &#128065; Detection
+            </button>
         </div>
 
         <div class="legend">
@@ -440,9 +520,26 @@
             <button class="btn-modal-close" onclick="closeSessionsModal()">Close</button>
         </div>
     </div>
+  </div>
 </div>
 
 <script>
+    /* ─── Toast system ─── */
+    function showToast(msg, type = 'info', duration = 3500) {
+        const container = document.getElementById('toast-container');
+        const t = document.createElement('div');
+        t.className = `toast toast-${type}`;
+        t.textContent = msg;
+        container.appendChild(t);
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => t.classList.add('show'));
+        });
+        setTimeout(() => {
+            t.classList.remove('show');
+            setTimeout(() => t.remove(), 350);
+        }, duration);
+    }
+
     /* ─── Exit line toggle ─── */
     let exitLineEnabled = true;
     let _exitLineSliderTimer = null;
@@ -734,42 +831,159 @@
         }
     }
 
-    /* ─── Start / stop ─── */
-    function startTracking() {
-        // If already running, stop first then restart
-        const doStart = () => {
-            fetch('/api/cameras').then(r => r.json()).then(d => {
-                const customSrc = document.getElementById('videoSource').value.trim();
-                let src = customSrc;
-                if (!src) {
-                    const cam = d.cameras.find(c => c.id === d.active_id);
-                    src = cam ? cam.source : '/dev/video0';
-                }
-                fetch('/api/start', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ source: src }),
-                }).then(r => r.json()).then(d => console.log(d))
-                  .catch(e => alert('Error: ' + e));
-            });
-        };
+    /* ─── Start / Pause / Resume ─── */
+    let _isPaused = false;
 
-        fetch('/api/stats').then(r => r.json()).then(d => {
-            if (d.is_running) {
-                // Auto-stop then start
-                fetch('/api/stop', { method: 'POST' })
-                    .then(r => r.json())
-                    .then(() => setTimeout(doStart, 300));
-            } else {
-                doStart();
+    function startTracking() {
+        fetch('/api/cameras').then(r => r.json()).then(camData => {
+            const customSrc = document.getElementById('videoSource').value.trim();
+            let src = customSrc;
+            if (!src) {
+                const cam = camData.cameras.find(c => c.id === camData.active_id);
+                src = cam ? cam.source : '/dev/video0';
             }
-        }).catch(() => doStart());
+            fetch('/api/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source: src }),
+            })
+            .then(r => r.json())
+            .then(d => {
+                if (d.error) {
+                    showToast('Start error: ' + d.error, 'error');
+                } else {
+                    showToast('\u25b6 Started: ' + String(src).split('/').pop(), 'success');
+                    _videoEndedNotified = false;
+                    _isPaused = false;
+                    _updatePauseBtn();
+                    const img = document.querySelector('.stream-container img');
+                    if (img) {
+                        img.src = '';
+                        setTimeout(() => { img.src = '/video_feed?t=' + Date.now(); }, 150);
+                    }
+                }
+            })
+            .catch(e => showToast('Error: ' + e, 'error'));
+        });
     }
 
     function stopTracking() {
         fetch('/api/stop', { method: 'POST' })
             .then(r => r.json())
-            .then(d => console.log(d));
+            .then(() => {
+                showToast('\u23f9 Stopped', 'info');
+                _isPaused = false;
+                _updatePauseBtn();
+            });
+    }
+
+    async function togglePause() {
+        if (_isPaused) {
+            const r = await fetch('/api/resume', { method: 'POST' });
+            const d = await r.json();
+            if (!d.error) {
+                _isPaused = false;
+                showToast('\u25b6 Resumed', 'success', 1500);
+            }
+        } else {
+            const r = await fetch('/api/pause', { method: 'POST' });
+            const d = await r.json();
+            if (!d.error) {
+                _isPaused = true;
+                showToast('\u23f8 Paused', 'info', 1500);
+            }
+        }
+        _updatePauseBtn();
+    }
+
+    function _updatePauseBtn() {
+        const btn = document.getElementById('btnPause');
+        if (_isPaused) {
+            btn.innerHTML = '&#9654; Resume';
+            btn.className = 'btn-resume';
+        } else {
+            btn.innerHTML = '&#10074;&#10074; Pause';
+            btn.className = 'btn-stop';
+        }
+    }
+
+    /* ─── Timeline seek ─── */
+    let _timelineDragging = false;
+
+    function onTimelineInput(val) {
+        _timelineDragging = true;
+        const pct = (val / 10).toFixed(1);
+        // Preview time while dragging
+        const tl = document.getElementById('videoTimeLabel');
+        if (tl && tl.dataset.dur) {
+            const dur = parseFloat(tl.dataset.dur);
+            const pos = dur * pct / 100;
+            tl.textContent = _fmtTime(pos) + ' / ' + _fmtTime(dur);
+        }
+    }
+
+    function onTimelineCommit(val) {
+        _timelineDragging = false;
+        const pct = val / 10;  // slider 0-1000 → 0-100%
+        fetch('/api/seek', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ position: pct }),
+        })
+        .then(r => r.json())
+        .then(d => {
+            if (d.error) showToast(d.error, 'warn', 2000);
+        })
+        .catch(e => showToast('Seek error: ' + e, 'error'));
+    }
+
+    function _fmtTime(sec) {
+        if (!sec || sec < 0) return '0:00';
+        const m = Math.floor(sec / 60);
+        const s = Math.floor(sec % 60);
+        return m + ':' + (s < 10 ? '0' : '') + s;
+    }
+
+    /* ─── Playback speed ─── */
+    function setSpeed(speed) {
+        fetch('/api/speed', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ speed: speed }),
+        })
+        .then(r => r.json())
+        .then(d => {
+            _syncSpeedBtns(d.speed);
+            showToast('Speed: ' + d.speed + 'x', 'info', 1200);
+        })
+        .catch(e => showToast('Speed error: ' + e, 'error'));
+    }
+
+    function _syncSpeedBtns(activeSpeed) {
+        document.querySelectorAll('.speed-btn').forEach(btn => {
+            const s = parseFloat(btn.dataset.speed);
+            btn.classList.toggle('speed-active', Math.abs(s - activeSpeed) < 0.01);
+        });
+    }
+
+    /* ─── Raw mode toggle ─── */
+    async function toggleRawMode() {
+        const r = await fetch('/api/raw_mode', { method: 'POST' });
+        const d = await r.json();
+        _applyRawMode(d.raw_mode);
+        showToast(d.raw_mode ? 'Visual anomaly detection' : 'Detection overlay ON', 'info', 1500);
+    }
+    function _applyRawMode(isRaw) {
+        const btn = document.getElementById('btnRawMode');
+        if (isRaw) {
+            btn.innerHTML = '&#128065; Raw';
+            btn.style.color = '#f0883e';
+            btn.style.borderColor = '#f0883e';
+        } else {
+            btn.innerHTML = '&#128065; Detection';
+            btn.style.color = '#c9d1d9';
+            btn.style.borderColor = '#30363d';
+        }
     }
 
     function pauseTracking() {
@@ -838,7 +1052,11 @@
             const dot = document.getElementById('statusDot');
             const txt = document.getElementById('statusText');
             if (d.video_ended) {
-                dot.className = 'status-dot ended'; txt.textContent = 'Video ended';
+                dot.className = 'status-dot ended'; txt.textContent = 'Video ended — press Start to replay';
+                if (!_videoEndedNotified) {
+                    _videoEndedNotified = true;
+                    showToast('⏹ Video ended — press Start to replay', 'warn', 5000);
+                }
             } else if (d.is_running) {
                 dot.className = 'status-dot running'; txt.textContent = 'Processing…';
             } else if (d.is_paused) {
@@ -871,10 +1089,265 @@
         });
     }
 
+    /* ─── Thresholds modal ─── */
+    async function openThreshModal() {
+        // Load current values from server before opening
+        try {
+            const r = await fetch('/api/config');
+            const d = await r.json();
+            const cfg = d.config || {};
+            const tc  = d.tracker_config || {};
+            document.getElementById('cfg_conf_paquet').value        = cfg.conf_paquet        ?? '';
+            document.getElementById('cfg_conf_barcode').value       = cfg.conf_barcode       ?? '';
+            document.getElementById('cfg_conf_date').value          = cfg.conf_date          ?? '';
+            document.getElementById('cfg_imgsz').value              = cfg.imgsz              ?? '';
+            document.getElementById('cfg_track_high_thresh').value  = tc.track_high_thresh   ?? '';
+            document.getElementById('cfg_track_low_thresh').value   = tc.track_low_thresh    ?? '';
+            document.getElementById('cfg_new_track_thresh').value   = tc.new_track_thresh    ?? '';
+            document.getElementById('cfg_match_thresh').value       = tc.match_thresh        ?? '';
+            document.getElementById('cfg_track_buffer').value       = tc.track_buffer        ?? '';
+        } catch(e) {
+            showToast('Could not load config: ' + e, 'error');
+        }
+        document.getElementById('threshModal').classList.add('open');
+    }
+
+    function closeThreshModal() {
+        document.getElementById('threshModal').classList.remove('open');
+    }
+
+    function _threshModalBgClick(e) {
+        if (e.target === document.getElementById('threshModal')) closeThreshModal();
+    }
+
+    async function applyThresholds() {
+        const get = id => {
+            const v = document.getElementById(id).value;
+            return v === '' ? undefined : parseFloat(v);
+        };
+        const getInt = id => {
+            const v = document.getElementById(id).value;
+            return v === '' ? undefined : parseInt(v);
+        };
+        const payload = {};
+        const addIfDefined = (key, val) => { if (val !== undefined && !isNaN(val)) payload[key] = val; };
+        addIfDefined('conf_paquet',        get('cfg_conf_paquet'));
+        addIfDefined('conf_barcode',       get('cfg_conf_barcode'));
+        addIfDefined('conf_date',          get('cfg_conf_date'));
+        addIfDefined('imgsz',              getInt('cfg_imgsz'));
+        addIfDefined('track_high_thresh',  get('cfg_track_high_thresh'));
+        addIfDefined('track_low_thresh',   get('cfg_track_low_thresh'));
+        addIfDefined('new_track_thresh',   get('cfg_new_track_thresh'));
+        addIfDefined('match_thresh',       get('cfg_match_thresh'));
+        addIfDefined('track_buffer',       getInt('cfg_track_buffer'));
+
+        try {
+            const r = await fetch('/api/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const d = await r.json();
+            if (d.error) {
+                showToast('Apply failed: ' + d.error, 'error');
+            } else {
+                showToast('\u2713 Thresholds applied', 'success', 2500);
+                closeThreshModal();
+            }
+        } catch(e) {
+            showToast('Apply error: ' + e, 'error');
+        }
+    }
+
+    /* ─── DB Stats ─── */
+    let _statsActive = false;
+    let _currentSessionId = null;
+    let _sessionStartTime = null;
+    let _sessionPickerFormat = 'csv';
+
+    async function pollDbStats() {
+        try {
+            const r = await fetch('/api/stats/status');
+            const d = await r.json();
+
+            _statsActive = d.stats_active;
+            _currentSessionId = d.session_id || null;
+
+            if (_statsActive && _currentSessionId) {
+                // Session is active — show live counters
+                document.getElementById('db-nok-barcode').textContent = d.nok_no_barcode ?? 0;
+                document.getElementById('db-nok-date').textContent    = d.nok_no_date    ?? 0;
+                document.getElementById('db-nok-both').textContent    = d.nok_both       ?? 0;
+                document.getElementById('dbNokRate').textContent      = (d.nok_rate_pct  ?? 0).toFixed(2) + '%';
+                document.getElementById('dbNokRate').style.color      = '#f85149';
+                document.getElementById('dbSessionInfo').textContent  =
+                    'Session: ' + _currentSessionId.substring(0, 8) + '...'
+                    + (_sessionStartTime ? '  ▶ ' + _sessionStartTime : '');
+            } else {
+                // No active session — blank out panel
+                document.getElementById('db-nok-barcode').innerHTML = '&#8212;';
+                document.getElementById('db-nok-date').innerHTML    = '&#8212;';
+                document.getElementById('db-nok-both').innerHTML    = '&#8212;';
+                document.getElementById('dbNokRate').textContent    = '\u2014';
+                document.getElementById('dbNokRate').style.color    = '#8b949e';
+                document.getElementById('dbSessionInfo').textContent = 'No active session';
+                _sessionStartTime = null;
+            }
+
+            _updateRecordBtn();
+        } catch(e) {}
+    }
+
+    async function initDbBackendBadge() {
+        try {
+            const r = await fetch('/api/stats/status');
+            const d = await r.json();
+            _statsActive = d.stats_active;
+            _currentSessionId = d.session_id || null;
+            _updateRecordBtn();
+        } catch(e) {}
+    }
+
+    function _updateRecordBtn() {
+        const btn = document.getElementById('btnStatsToggle');
+        if (_statsActive) {
+            btn.innerHTML = '&#9210; Recording: ON';
+            btn.className = 'db-btn db-btn-record-on';
+        } else {
+            btn.innerHTML = '&#9210; Recording: OFF';
+            btn.className = 'db-btn db-btn-record-off';
+        }
+    }
+
+    async function toggleStatsRecording() {
+        try {
+            const r = await fetch('/api/stats/toggle', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: '{}',
+            });
+            const d = await r.json();
+            _statsActive      = d.stats_active;
+            _currentSessionId = d.session_id || null;
+            if (_statsActive) {
+                _sessionStartTime = new Date().toLocaleTimeString();
+                showToast('&#9210; Recording started', 'success', 2500);
+            } else {
+                _sessionStartTime = null;
+                showToast('&#9210; Session saved — recording stopped', 'warn', 3000);
+            }
+            _updateRecordBtn();
+        } catch(e) {
+            showToast('Toggle error: ' + e, 'error');
+        }
+    }
+
+    /* ── Session Picker Modal ── */
+    function _sessionModalBgClick(e) {
+        if (e.target === document.getElementById('sessionPickerModal')) closeSessionPicker();
+    }
+
+    function closeSessionPicker() {
+        document.getElementById('sessionPickerModal').classList.remove('open');
+    }
+
+    async function openSessionPicker(format) {
+        _sessionPickerFormat = format;
+        document.getElementById('sessionPickerTitle').textContent =
+            (format === 'csv' ? '\u2193 Export Session \u2014 CSV' : '\u2193 Export Session \u2014 JSON');
+        const list = document.getElementById('sessionPickerList');
+        list.innerHTML = '<div style="color:#484f58;font-size:0.85em;text-align:center;padding:20px 0;">Loading…</div>';
+        document.getElementById('sessionPickerModal').classList.add('open');
+
+        try {
+            const r = await fetch('/api/sessions?limit=50');
+            const d = await r.json();
+            const sessions = d.sessions || [];
+
+            if (!sessions.length) {
+                list.innerHTML = '<div style="color:#484f58;font-size:0.85em;text-align:center;padding:20px 0;">No sessions recorded yet.</div>';
+                return;
+            }
+
+            list.innerHTML = '';
+            sessions.forEach(s => {
+                const started = s.started_at ? s.started_at.replace('T', ' ') : '?';
+                const ended   = s.ended_at   ? s.ended_at.replace('T', ' ')   : 'in progress';
+                const total   = s.total ?? 0;
+                const ok      = s.ok_count ?? 0;
+                const nok     = total - ok;
+                const rate    = total > 0 ? ((nok / total) * 100).toFixed(1) : '0.0';
+                const isActive = s.id === _currentSessionId;
+
+                const row = document.createElement('div');
+                row.style.cssText = `
+                    display:flex; align-items:center; gap:10px;
+                    background:${isActive ? '#0d2818' : '#0d1117'};
+                    border:1px solid ${isActive ? '#238636' : '#21262d'};
+                    border-radius:8px; padding:10px 14px; cursor:pointer;
+                    transition: border-color 0.15s;
+                `;
+                row.onmouseenter = () => row.style.borderColor = '#58a6ff';
+                row.onmouseleave = () => row.style.borderColor = isActive ? '#238636' : '#21262d';
+                row.innerHTML = `
+                    <div style="flex:1; min-width:0;">
+                        <div style="font-size:0.82em; font-weight:600; color:#c9d1d9; margin-bottom:3px;">
+                            ${started} &rarr; ${ended}
+                            ${isActive ? '<span style="color:#3fb950;font-size:0.8em;margin-left:6px;">● live</span>' : ''}
+                        </div>
+                        <div style="font-size:0.72em; color:#8b949e;">
+                            Total: <b style="color:#58a6ff;">${total}</b>
+                            &nbsp;&nbsp;OK: <b style="color:#3fb950;">${ok}</b>
+                            &nbsp;&nbsp;NOK: <b style="color:#f85149;">${nok}</b>
+                            &nbsp;&nbsp;NOK rate: <b style="color:#d29922;">${rate}%</b>
+                        </div>
+                    </div>
+                    <button style="
+                        background:#1f6feb; border:none; color:#fff; border-radius:6px;
+                        padding:6px 14px; font-size:0.8em; font-weight:600; cursor:pointer;
+                        white-space:nowrap;
+                    ">&#8659; ${format.toUpperCase()}</button>
+                `;
+                row.querySelector('button').onclick = (e) => {
+                    e.stopPropagation();
+                    _downloadSession(s.id, format);
+                    closeSessionPicker();
+                };
+                row.onclick = () => { _downloadSession(s.id, format); closeSessionPicker(); };
+                list.appendChild(row);
+            });
+        } catch(e) {
+            list.innerHTML = '<div style="color:#f85149;font-size:0.85em;text-align:center;padding:20px 0;">Error loading sessions: ' + e + '</div>';
+        }
+    }
+
+    async function _downloadSession(sid, format) {
+        if (format === 'csv') {
+            const a = document.createElement('a');
+            a.href     = '/api/export/csv?session_id=' + sid;
+            a.download = 'session_' + sid.substring(0, 8) + '.csv';
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            showToast('\u2193 Downloading CSV…', 'info', 2000);
+        } else {
+            try {
+                const r    = await fetch('/api/export/json?session_id=' + sid);
+                const d    = await r.json();
+                const blob = new Blob([JSON.stringify(d, null, 2)], { type: 'application/json' });
+                const url  = URL.createObjectURL(blob);
+                const a    = document.createElement('a');
+                a.href = url; a.download = 'session_' + sid.substring(0, 8) + '.json';
+                document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                showToast('\u2193 Downloading JSON…', 'info', 2000);
+            } catch(e) { showToast('Export error: ' + e, 'error'); }
+        }
+    }
+
     /* ─── Init ─── */
     loadSelectors();
     _updateAxisLabel();
     setInterval(updateStats, 400);
+    setInterval(pollDbStats, 2000);
 </script>
 </body>
 </html>

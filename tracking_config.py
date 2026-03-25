@@ -1,13 +1,6 @@
-"""
-Configuration for the Parallel Tracking Web Server.
-All tunable parameters are centralized here.
-"""
-
 # ==========================
 # CHECKPOINTS  (add or remove models here)
 # ==========================
-# mode = "tracking" → full ByteTrack + barcode logic
-# mode = "date"     → simple all-class detection overlay (no tracking)
 CHECKPOINTS = [
     {
         "id":            "tracking",
@@ -109,6 +102,11 @@ def get_camera(camera_id):
 
 DEVICE = 'cuda'  
 # ==========================
+# DEVICE  ('cpu' or 'cuda')
+# ==========================
+DEVICE = 'cuda'  # NVIDIA GPU
+
+# ==========================
 # DETECTION & TRACKING
 # ==========================
 CONFIG = {
@@ -127,7 +125,7 @@ CONFIG = {
 # ==========================
 # CAMERA DEFAULTS
 # ==========================
-CAMERA_FPS = 30
+CAMERA_FPS = 60
 CAMERA_WIDTH = 1280
 CAMERA_HEIGHT = 720
 
@@ -149,11 +147,8 @@ SERVER_PORT = 5000
 
 # ==========================
 # FRAME SKIP (detector receives 1 frame out of N)
-# Set to 1 to disable skipping — RTX 4090 can run inference on every frame
-# at full speed. Skipping frames breaks Ultralytics persist=True tracker
-# because its Kalman filter expects consecutive input.
 # ==========================
-DETECTOR_FRAME_SKIP = 1
+DETECTOR_FRAME_SKIP = 2
 
 # Anomaly mode processes heavier per-frame (segmentation + EfficientAD),
 # so skip more frames to keep the pipeline responsive.

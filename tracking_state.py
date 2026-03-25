@@ -32,6 +32,14 @@ from tracking_config import (
     TRACKER_CONFIG,
 )
 
+try:
+    from db_writer import DBWriter
+    from db_config import SNAPSHOT_EVERY_N_PACKETS
+    _DB_AVAILABLE = True
+except ImportError:
+    _DB_AVAILABLE = False
+    SNAPSHOT_EVERY_N_PACKETS = 50
+
 
 def _write_tracker_yaml():
     """Write TRACKER_CONFIG dict to a temp YAML file (Ultralytics needs a file path)."""
@@ -48,9 +56,10 @@ TRACKER_YAML_PATH = _write_tracker_yaml()
 
 class TrackingState:
     """
-    Two independent threads:
-      - Reader:   captures frames at native FPS (smooth video, no YOLO dependency)
-      - Detector: runs YOLO + ByteTrack on latest frame, updates overlay & stats
+    Three independent threads:
+      - Reader:     captures frames at native FPS (smooth video, no YOLO dependency)
+      - Detector:   runs YOLO + ByteTrack on latest frame, updates overlay & stats
+      - Compositor: composites raw frame + detection overlay, encodes JPEG
 
     The video feed composites the latest raw frame with the latest detection
     overlay, so the stream is always smooth regardless of YOLO speed.
@@ -88,6 +97,9 @@ class TrackingState:
 
         self.video_source = None
         self.cap = None
+        # External frame source support (callable, iterator, pre-opened capture)
+        self._external_frame_source = None
+        self._cap_owned = False
         self.is_running = False
         self._is_video_file = False
         self._video_ended = False
@@ -114,6 +126,7 @@ class TrackingState:
 
         # ── Detection overlay data ──
         self._overlay = self._empty_overlay()
+        self._overlay_frame = None   # frame that was used for this overlay (video sync)
         self._overlay_lock = threading.Lock()
 
         # ── Pre-encoded JPEG bytes (produced by compositor thread) ──
@@ -126,6 +139,13 @@ class TrackingState:
 
         # ── Exit line Y position (set once by detector from first frame, never via overlay) ──
         self._exit_line_y = 0
+        # ── Exit line as % from leading edge (survives sessions & rotation changes) ──
+        self._exit_line_pct = 85
+        # ── Exit line orientation: False = horizontal (y), True = vertical (x) ──
+        self._exit_line_vertical = False
+        # ── Exit line direction inverted: % measured from opposite edge ──
+        # e.g. 85% normally = 85% from top; inverted = 85% from bottom (= 15% from top)
+        self._exit_line_inverted = False
         # ── Exit line enabled flag (can be toggled via API, survives sessions) ──
         self._exit_line_enabled = True
         # ── Exit line as % from leading edge (survives sessions & rotation changes) ──
@@ -160,6 +180,17 @@ class TrackingState:
         self._nok_no_barcode = 0
         self._nok_no_date = 0
 
+        # ── DB writer (Thread 4 — fully async, never blocks detection) ──
+        self._db_writer     = DBWriter() if _DB_AVAILABLE else None
+        self._db_session_id = None        # UUID of current session (None = no active session)
+        self._stats_active  = False       # OFF by default — user activates via toggle button
+        # Per-session NOK sub-counters
+        self._nok_no_barcode = 0
+        self._nok_no_date    = 0
+        self._nok_both       = 0
+        if self._db_writer:
+            self._db_writer.start()
+
     # ─────────────────────────────────────────
 
     @staticmethod
@@ -190,6 +221,7 @@ class TrackingState:
             "is_running": False,
             "is_paused": False,
             "video_ended": False,
+            "paused": False,
         }
 
     @staticmethod
@@ -588,25 +620,50 @@ class TrackingState:
 
     def start_processing(self, video_source):
         if self.is_running:
-            return {"error": "Already processing"}
+            print("[START] Restarting with new source...")
+            self.is_running = False
+            if self.cap:
+                try:
+                    self.cap.release()
+                except Exception:
+                    pass
+                self.cap = None
 
+        # Accept flexible video sources
         self.video_source = video_source
+        self._external_frame_source = None
+        self._cap_owned = False
+        if hasattr(video_source, "read") and callable(getattr(video_source, "read")):
+            self.cap = video_source
+            self._cap_owned = False
+        elif hasattr(video_source, "__iter__") and not isinstance(video_source, (str, bytes)):
+            self._external_frame_source = iter(video_source)
+            self.cap = None
+        elif callable(video_source) and not isinstance(video_source, str):
+            self._external_frame_source = video_source
+            self.cap = None
+
+        # Save current position BEFORE reset so we can resume from it
+        _resume_frame = self._video_pos_frames if self._is_video_file else 0
+        if self._video_ended:
+            _resume_frame = 0
         self._reset_session()
         self._is_video_file = isinstance(video_source, str) and any(
             video_source.lower().endswith(ext)
             for ext in VIDEO_EXTENSIONS
         )
+        if self._is_video_file and _resume_frame > 0:
+            self._seek_target = _resume_frame
 
         # Reset built-in tracker state for fresh session
         if hasattr(self.model, 'predictor') and self.model.predictor is not None:
             self.model.predictor.trackers = []
             self.model.predictor = None
 
-        self._session_gen += 1          # bump before launching so threads capture the right id
+        self._session_gen += 1
         my_gen = self._session_gen
         self.is_running = True
 
-        # Launch THREE parallel threads, stamping each with the current session gen
         threading.Thread(target=self._reader_loop,     args=(my_gen,), daemon=True, name="VideoReader").start()
         threading.Thread(target=self._detection_loop,  daemon=True, name="YOLODetector").start()
         threading.Thread(target=self._compositor_loop, daemon=True, name="Compositor").start()
@@ -615,6 +672,9 @@ class TrackingState:
         return {"status": "started", "source": video_source, "mode": mode}
 
     def stop_processing(self):
+        # Session lifecycle is managed by the toggle button, not by stop.
+        # If recording is active when stop is called, leave session open
+        # so it continues when processing resumes.
         self.is_running = False
         self._is_paused = False
         self._paused_frame_pos = 0
@@ -622,11 +682,11 @@ class TrackingState:
         time.sleep(0.5)  # Give threads time to exit cleanly
         if self.cap:
             try:
-                self.cap.release()
+                if self._cap_owned:
+                    self.cap.release()
             except Exception:
                 pass
             self.cap = None
-        # Force CUDA cleanup to prevent segfault
         try:
             import torch
             if torch.cuda.is_available():
@@ -798,7 +858,7 @@ class TrackingState:
 
         # 2. Unload model(s) from VRAM
         if self.model is not None:
-            print(f"[SWITCH] Unloading model from VRAM...")
+            print(f"[SWITCH] Unloading primary model from VRAM...")
             del self.model
             self.model = None
         if self.secondary_model is not None:
@@ -831,7 +891,7 @@ class TrackingState:
         self.model.to(DEVICE)
         names = self.model.names
 
-        # 4. Resolve class IDs (None = class not present / not needed)
+        # 4. Resolve class IDs
         pkg_cls = checkpoint.get("package_class")
         bar_cls = checkpoint.get("barcode_class")
         date_cls = checkpoint.get("date_class")
@@ -840,6 +900,27 @@ class TrackingState:
         self.date_id = next((k for k, v in names.items() if v == date_cls), None) if date_cls else None
         self.mode = checkpoint.get("mode", "tracking")
         self.current_checkpoint = checkpoint
+
+        # Ensure each checkpoint has explicit per-class thresholds so
+        # switching to a model that doesn't specify them won't break
+        # detection. Prefer values defined on the checkpoint, then fall
+        # back to global `CONFIG` entries. If those are absent, use
+        # conservative numeric fallbacks.
+        try:
+            from tracking_config import CONFIG as _GLOBAL_CONFIG
+        except Exception:
+            _GLOBAL_CONFIG = {}
+
+        missing = []
+        for k, fallback in (('conf_paquet', 0.45), ('conf_barcode', 0.45), ('conf_date', 0.30)):
+            if k not in self.current_checkpoint or self.current_checkpoint.get(k) is None:
+                if k in _GLOBAL_CONFIG:
+                    self.current_checkpoint[k] = _GLOBAL_CONFIG[k]
+                else:
+                    self.current_checkpoint[k] = fallback
+                missing.append(k)
+        if missing:
+            print(f"[SWITCH] Populated missing thresholds for checkpoint: {', '.join(missing)}")
 
         print(f"[SWITCH] Loaded | mode={self.mode} | "
               f"package_id={self.package_id} barcode_id={self.barcode_id} date_id={self.date_id}")
@@ -878,7 +959,6 @@ class TrackingState:
 
         # 5. Warm up
         try:
-            import numpy as np
             from tracking_config import CONFIG
             dummy = np.zeros((640, 640, 3), dtype=np.uint8)
             self.model(dummy, imgsz=CONFIG["imgsz"], verbose=False)
@@ -908,8 +988,9 @@ class TrackingState:
             if isinstance(src, str) and src.startswith("rtsp://"):
                 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
                 self.cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
+                self._cap_owned = True
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            elif self._is_video_file:
+            elif self._is_video_file and ext_src is None:
                 if not Path(src).exists():
                     print(f"[READER] ERROR: File not found: {src}")
                     self.is_running = False
@@ -929,7 +1010,8 @@ class TrackingState:
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-            if not self.cap or not self.cap.isOpened():
+            # Verify capture is opened (skip check for external callable/iterator)
+            if self.cap is not None and not self.cap.isOpened():
                 print(f"[READER] ERROR: Cannot open source: {src}")
                 self.is_running = False
                 return
@@ -953,20 +1035,78 @@ class TrackingState:
 
             self._frame_width = w
             self._frame_height = h
+            self._video_fps = fps
 
-            print(f"[READER] Opened: {w}x{h} @ {fps:.0f}fps | "
-                  f"{'Video file' if self._is_video_file else 'Live camera'}")
+            # For video files, get total frame count for timeline
+            if self._is_video_file and self.cap is not None:
+                self._video_total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                dur = self._video_total_frames / fps if fps > 0 else 0
+                print(f"[READER] Opened: {w}x{h} @ {fps:.0f}fps | "
+                      f"Video file | {self._video_total_frames} frames | {dur:.1f}s")
+            else:
+                self._video_total_frames = 0
+                print(f"[READER] Opened: {w}x{h} @ {fps:.0f}fps | Live camera")
 
             while self.is_running:
                 t0 = time.time()
 
-                ret, frame = self.cap.read()
+                # ── Handle seek request (works even while paused) ──
+                _seek = self._seek_target
+                if _seek is not None:
+                    self._seek_target = None
+                    if self.cap is not None:
+                        self.cap.set(cv2.CAP_PROP_POS_FRAMES, _seek)
+                    self._video_pos_frames = _seek
+                    # Reset tracker state on seek
+                    self.packages.clear()
+                    self.packets_crossed_line.clear()
+                    self.total_packets = 0
+                    self.output_fifo.clear()
+                    self.packet_numbers.clear()
+                    if hasattr(self.model, 'predictor') and self.model.predictor is not None:
+                        self.model.predictor.trackers = []
+                        self.model.predictor = None
+                    with self._stats_lock:
+                        self.stats["total_packets"] = 0
+                        self.stats["packages_ok"] = 0
+                        self.stats["packages_nok"] = 0
+                        self.stats["fifo_queue"] = []
+
+                # ── Pause: sleep and re-check (seek above still works) ──
+                if self._paused and _seek is None:
+                    time.sleep(0.05)
+                    continue
+
+                # ── Read frame ──
+                if ext_src is not None and not (hasattr(ext_src, "read") and callable(getattr(ext_src, "read"))):
+                    frm = None
+                    try:
+                        if callable(ext_src):
+                            frm = ext_src()
+                        else:
+                            frm = next(ext_src)
+                    except StopIteration:
+                        ret, frame = False, None
+                    except Exception as e:
+                        print(f"[READER] External source error: {e}")
+                        ret, frame = False, None
+                    else:
+                        if isinstance(frm, tuple) and len(frm) >= 2:
+                            ret, frame = frm[0], frm[1]
+                        else:
+                            frame = frm
+                            ret = frame is not None
+                else:
+                    ret, frame = self.cap.read()
+
                 if not ret:
                     if self._is_video_file:
                         print("[READER] Video file ended")
                         self._video_ended = True
                         with self._stats_lock:
                             self.stats["video_ended"] = True
+                    else:
+                        print("[READER] Source ended or returned no frame")
                     break
 
                 self.frame_count += 1
@@ -977,7 +1117,16 @@ class TrackingState:
                 if rot_steps:
                     frame = self._rotate_frame_ccw(frame, rot_steps)
 
-                # Store raw frame for streaming (always latest)
+                # Track video position for timeline
+                if self._is_video_file and self.cap is not None:
+                    self._video_pos_frames = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+
+                # Optional live rotation
+                rot_steps = self._rotation_steps % 4
+                if rot_steps:
+                    frame = self._rotate_frame_ccw(frame, rot_steps)
+
+                # Store raw frame for streaming
                 with self._raw_lock:
                     self._raw_frame = frame
                 with self._raw_history_lock:
@@ -996,10 +1145,15 @@ class TrackingState:
                         self._det_frame_idx = frame_idx
                     self._det_event.set()
 
-                # Pour les fichiers vidéo: respecte le FPS natif
+                # If we just processed a seek frame while paused, go back to waiting
+                if self._paused:
+                    continue
+
+                # For video files: respect native FPS (speed-adjusted)
                 if self._is_video_file:
+                    speed = max(0.1, self._playback_speed)
                     elapsed = time.time() - t0
-                    sleep = frame_time - elapsed
+                    sleep = (frame_time / speed) - elapsed
                     if sleep > 0:
                         time.sleep(sleep)
 
@@ -1008,21 +1162,18 @@ class TrackingState:
             import traceback
             traceback.print_exc()
         finally:
-            time.sleep(0.1)  # Let other threads notice is_running change
-            if self.cap:
+            time.sleep(0.1)
+            if self.cap and self._cap_owned:
                 try:
                     self.cap.release()
                 except Exception:
                     pass
-                self.cap = None
-            # Only update shared state if this is still the current session;
-            # a newer session may have already set is_running = True.
+            self.cap = None
             if self._session_gen == session_gen:
                 self.is_running = False
                 with self._stats_lock:
                     self.stats["is_running"] = False
             print(f"[READER] Stopped (gen={session_gen})")
-
 
     # ═══════════════════════════════════════════
     # THREAD 2: YOLO + BYTETRACK (parallel)
@@ -1031,7 +1182,6 @@ class TrackingState:
     def _detection_loop(self):
         """Run YOLO + ByteTrack in parallel. Updates overlay & stats independently."""
         try:
-            # Wait for first frame to get dimensions (up to 20s)
             print("[DETECTOR] Waiting for first frame...")
             for attempt in range(200):
                 if not self.is_running:
@@ -1054,9 +1204,8 @@ class TrackingState:
             self._recompute_exit_line_y()
             EXIT_LINE_Y = self._exit_line_y
 
-            # Immediately publish exit line so compositor can draw it
             with self._overlay_lock:
-                self._overlay['exit_line_y'] = EXIT_LINE_Y
+                self._overlay['exit_line_y'] = self._exit_line_y
 
             steps = self._rotation_steps % 4
             orientation = 'horizontal' if steps in (0, 2) else 'vertical'
@@ -1095,14 +1244,12 @@ class TrackingState:
                 print(f"[DETECTOR] Warmup failed (non-fatal): {wu_err}")
 
             while self.is_running:
-                # Wait for new frame signal (longer timeout=ok, YOLO is slow)
                 if not self._det_event.wait(timeout=1.0):
                     if not self.is_running:
                         break
                     continue
                 self._det_event.clear()
 
-                # Grab latest frame (always the newest, skip any we missed)
                 with self._det_lock:
                     frame = self._det_frame
                     frame_idx = self._det_frame_idx
@@ -1117,7 +1264,7 @@ class TrackingState:
                     self._perf["detector_lag_frames"] = lag_frames
                     self._perf["detector_last_frame_idx"] = frame_idx
 
-                # ── YOLO Inference (with error handling) ──
+                # ── YOLO Inference ──
                 try:
                     cp = self.current_checkpoint or {}
                     conf_list = [
@@ -1132,7 +1279,6 @@ class TrackingState:
                     yolo_conf = cp.get("yolo_conf", conf_min)
 
                     if self.mode == "tracking":
-                        # Built-in ByteTrack: detection + tracking in one call
                         results = self.model.track(
                             frame,
                             half=False,
@@ -1154,7 +1300,6 @@ class TrackingState:
                             retina_masks=True,
                         )[0]
                     else:
-                        # Date mode: plain detection, no tracking
                         results = self.model(
                             frame,
                             conf=conf_min,
@@ -1165,7 +1310,7 @@ class TrackingState:
                     print(f"[DETECTOR] YOLO inference error: {yolo_err}")
                     continue
 
-                # ── DATE DETECTION mode: simple overlay, no tracking ──
+                # ── DATE DETECTION mode ──
                 if self.mode == "date":
                     date_boxes = []
                     if results.boxes is not None:
@@ -1192,6 +1337,7 @@ class TrackingState:
                             'det_ms':        det_ms,
                             'frame_idx':     frame_idx,
                         }
+                        self._overlay_frame = frame
                     with self._stats_lock:
                         self.stats.update({
                             "det_fps":       round(det_fps, 1),
@@ -1531,8 +1677,11 @@ class TrackingState:
 
                     track_boxes.append((x1, y1, x2, y2, lbl, color))
 
-                # ── Exit line crossing ──
+                # ── Exit line crossing (horizontal: y2; vertical: x2) ──
                 if self._exit_line_enabled:
+                    current_exit = self._exit_line_y
+                    line_is_vert = self._exit_line_vertical
+                    exit_pct = self._exit_line_pct  # e.g. 85 → line in the far portion
                     for t in tracks:
                         x1, y1, x2, y2, tid = map(int, t[:5])
                         if tid not in self.packages:
@@ -1605,6 +1754,45 @@ class TrackingState:
                                     except Exception:
                                         pass
 
+                            # ── Compute defect type for DB ──
+                            if self._use_secondary_date:
+                                if not has_bc and not has_dt:
+                                    _defect = "both"
+                                elif not has_bc:
+                                    _defect = "no_barcode"
+                                elif not has_dt:
+                                    _defect = "no_date"
+                                else:
+                                    _defect = None
+                            else:
+                                _defect = "no_barcode" if not has_bc else None
+
+                            # ── Update in-memory NOK sub-counters ──
+                            if _defect == "no_barcode":
+                                self._nok_no_barcode += 1
+                            elif _defect == "no_date":
+                                self._nok_no_date += 1
+                            elif _defect == "both":
+                                self._nok_both += 1
+
+                            # ── Periodic KPI snapshot ──
+                            if (self._db_writer and self._stats_active
+                                    and self._db_session_id
+                                    and self.total_packets % SNAPSHOT_EVERY_N_PACKETS == 0):
+                                try:
+                                    _ok = self.output_fifo.count("OK")
+                                    self._db_writer.write_queue.put_nowait({
+                                        "type":           "snapshot",
+                                        "session_id":     self._db_session_id,
+                                        "total":          self.total_packets,
+                                        "ok_count":       _ok,
+                                        "nok_no_barcode": self._nok_no_barcode,
+                                        "nok_no_date":    self._nok_no_date,
+                                        "nok_both":       self._nok_both,
+                                    })
+                                except Exception:
+                                    pass
+
                 # ── Detection timing ──
                 det_ms = (time.time() - t_start) * 1000
                 det_fps = 1000 / det_ms if det_ms > 0 else 0
@@ -1616,11 +1804,12 @@ class TrackingState:
                     fifo_items.append(f"#{i}:{d}")
                 fifo_str = " | ".join(fifo_items) if fifo_items else "(empty)"
 
-                # Barcode overlay
                 barcode_vis = [(int(bx1), int(by1), int(bx2), int(by2), bc)
                                for bx1, by1, bx2, by2, bc in barcode_dets]
 
-                # ── Store overlay for video feed ──
+                date_vis = [(dx1, dy1, dx2, dy2, dc)
+                            for dx1, dy1, dx2, dy2, dc in all_date_dets]
+
                 with self._overlay_lock:
                     self._overlay = {
                         'track_boxes': track_boxes,
@@ -1633,8 +1822,8 @@ class TrackingState:
                         'det_ms': det_ms,
                         'frame_idx': frame_idx,
                     }
+                    self._overlay_frame = frame
 
-                # ── Update API stats ──
                 ok = self.output_fifo.count("OK")
                 nok = self.output_fifo.count("NOK")
 
@@ -1667,7 +1856,6 @@ class TrackingState:
         Continuously composites raw frame + detection overlay and
         pre-encodes to JPEG bytes. The MJPEG feed just yields these
         bytes instantly — zero computation in the request handler.
-        Runs at native video FPS, woken by _raw_changed event.
         """
         encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
         print("[COMPOSITOR] Started")
@@ -1682,16 +1870,46 @@ class TrackingState:
                 if got:
                     self._raw_changed.clear()
 
-                # Grab latest raw frame
-                with self._raw_lock:
-                    raw = self._raw_frame
-                if raw is None:
-                    continue
-
-                frame = raw.copy()
+                # For video files use the frame that was actually detected on
+                # so bounding boxes align exactly with the pixels they describe.
+                # For live cameras keep using the freshest raw frame.
+                if self._is_video_file:
+                    with self._overlay_lock:
+                        det_frame = self._overlay_frame
+                    if det_frame is not None:
+                        frame = det_frame.copy()
+                    else:
+                        with self._raw_lock:
+                            raw = self._raw_frame
+                        if raw is None:
+                            continue
+                        frame = raw.copy()
+                else:
+                    with self._raw_lock:
+                        raw = self._raw_frame
+                    if raw is None:
+                        continue
+                    frame = raw.copy()
                 h, w = frame.shape[:2]
 
-                # Grab latest overlay (from detector thread)
+                # ── RAW MODE: skip all detection overlays ──
+                if self._raw_mode:
+                    cv2.putText(frame, "RAW", (w - 100, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 140, 255), 2)
+                    cv2.putText(frame, f"Frame: {self.frame_count}",
+                                (w - 180, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+                    if self._paused:
+                        cv2.putText(frame, "|| PAUSED", (10, 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+                    ret, buf = cv2.imencode('.jpg', frame, encode_params)
+                    if ret:
+                        with self._jpeg_lock:
+                            self._jpeg_bytes = buf.tobytes()
+                    if self._video_ended and not self.is_running:
+                        break
+                    continue
+
+                # Grab latest overlay
                 with self._overlay_lock:
                     ov_tracks    = list(self._overlay.get('track_boxes', []))
                     ov_barcodes  = list(self._overlay.get('barcode_boxes', []))
@@ -1779,7 +1997,6 @@ class TrackingState:
                 cv2.putText(frame, f"TOTAL: {ov_total}",
                             (w - 250, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
-                # Show "Waiting for YOLO..." before first detection arrives
                 if ov_det_ms == 0 and len(ov_tracks) == 0:
                     cv2.putText(frame, "YOLO: warming up...",
                                 (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
@@ -1791,7 +2008,12 @@ class TrackingState:
                 cv2.putText(frame, f"Frame: {self.frame_count}",
                             (w - 180, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
 
-                # ── Encode to JPEG once (reused by all browser clients) ──
+                # Pause indicator
+                if self._paused:
+                    cv2.putText(frame, "|| PAUSED", (w // 2 - 80, 40),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 200, 255), 2)
+
+                # ── Encode JPEG ──
                 ret, buf = cv2.imencode('.jpg', frame, encode_params)
                 if ret:
                     with self._jpeg_lock:
