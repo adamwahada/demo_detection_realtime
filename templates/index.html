@@ -62,10 +62,42 @@
         }
         .btn-start { background: #238636; color: #fff; }
         .btn-start:hover { background: #2ea043; }
+        .btn-pause { background: #9e6a03; color: #fff; }
+        .btn-pause:hover { background: #d29922; }
+        .btn-resume { background: #1f6feb; color: #fff; }
+        .btn-resume:hover { background: #388bfd; }
         .btn-exit-on  { background: #1f6feb; color: #fff; }
         .btn-exit-on:hover  { background: #388bfd; }
         .btn-exit-off { background: #484f58; color: #e6edf3; }
         .btn-exit-off:hover { background: #6e7681; }
+        .btn-rot { background: #6f42c1; color: #fff; }
+        .btn-rot:hover { background: #8250df; }
+        .btn-stop { background: #da3633; color: #fff; }
+        .btn-stop:hover { background: #f85149; }
+
+        .exit-line-row {
+            display: flex; align-items: center; gap: 10px;
+            background: #161b22; padding: 8px 14px; border-radius: 8px;
+            border: 1px solid #30363d; flex-wrap: wrap;
+        }
+        .exit-line-row .axis-label {
+            font-size: 0.72em; color: #8b949e; white-space: nowrap;
+            text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .exit-line-row input[type="range"] {
+            flex: 1; min-width: 140px; cursor: pointer;
+            accent-color: #58a6ff;
+        }
+        .exit-line-row .pct-label {
+            font-size: 0.85em; font-weight: 600; color: #58a6ff;
+            min-width: 38px; text-align: right;
+        }
+        .btn-exit-sub {
+            background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+            border-radius: 6px; padding: 4px 10px; cursor: pointer;
+            font-size: 0.8em; white-space: nowrap;
+        }
+        .btn-exit-sub:hover { border-color: #58a6ff; }
 
         .switching-overlay {
             display: none; position: fixed; inset: 0; z-index: 999;
@@ -156,10 +188,79 @@
         }
         .status-dot.running { background: #3fb950; animation: pulse 1.5s infinite; }
         .status-dot.ended   { background: #d29922; }
+        .status-dot.paused  { background: #9e6a03; }
         @keyframes pulse {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.4; }
         }
+
+        .db-btn {
+            display: block; width: 100%; padding: 8px 12px; border: none;
+            border-radius: 6px; font-size: 0.82em; font-weight: 600;
+            cursor: pointer; text-align: center;
+        }
+        .db-btn-record-on { background: #238636; color: #fff; }
+        .db-btn-record-off { background: #484f58; color: #e6edf3; }
+        .db-backend-badge {
+            display: inline-block; font-size: 0.68em; padding: 1px 7px;
+            border-radius: 8px; font-weight: 600; vertical-align: middle; margin-left: 6px;
+        }
+        .db-backend-sqlite { background: #3d2a00; color: #d29922; border: 1px solid #9e6a03; }
+        .db-backend-postgres { background: #0d2818; color: #3fb950; border: 1px solid #238636; }
+        .db-mini-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+        .db-mini-item {
+            background: #0d1117; border: 1px solid #21262d; border-radius: 6px;
+            padding: 7px 4px; text-align: center;
+        }
+        .db-mini-val { font-size: 1.2em; font-weight: 700; color: #f85149; }
+        .db-mini-label { font-size: 0.64em; color: #8b949e; margin-top: 2px; }
+        .db-session-id {
+            font-size: 0.68em; color: #8b949e; word-break: break-all;
+            margin: 8px 0; padding: 6px 8px; background: #0d1117;
+            border-radius: 4px; border: 1px solid #21262d;
+        }
+        .btn-sessions {
+            margin-top: 8px; background: #1f6feb; color: #fff;
+            border: none; border-radius: 6px; padding: 8px 10px;
+            cursor: pointer; width: 100%; font-size: 0.82em; font-weight: 600;
+        }
+        .btn-sessions:hover { background: #388bfd; }
+
+        .modal-backdrop {
+            display: none; position: fixed; inset: 0; z-index: 1000;
+            background: rgba(0,0,0,0.65); align-items: center; justify-content: center;
+        }
+        .modal-backdrop.open { display: flex; }
+        .modal {
+            background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+            padding: 18px 20px; min-width: 560px; max-width: 860px; width: 92%;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+        }
+        .modal h2 { font-size: 1em; color: #58a6ff; margin-bottom: 12px; }
+        .btn-modal-close {
+            background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+            border-radius: 6px; padding: 7px 14px; cursor: pointer; font-size: 0.85em;
+        }
+        .btn-modal-close:hover { border-color: #58a6ff; }
+        .session-row {
+            padding: 8px 10px; border: 1px solid #30363d; border-radius: 6px;
+            background: #0d1117; cursor: pointer;
+        }
+        .session-row:hover { border-color: #58a6ff; }
+        .session-row.active { border-color: #3fb950; }
+        .session-id-mini {
+            font-size: 0.7em; color: #8b949e; margin-top: 4px;
+            word-break: break-all;
+        }
+        .session-kpi-grid {
+            display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;
+        }
+        .session-kpi-card {
+            background: #0d1117; border: 1px solid #21262d; border-radius: 6px;
+            padding: 8px; text-align: center;
+        }
+        .session-kpi-val { font-size: 1.25em; font-weight: 700; }
+        .session-kpi-label { font-size: 0.68em; color: #8b949e; margin-top: 2px; }
     </style>
 </head>
 <body>
@@ -206,8 +307,27 @@
                 title="Leave empty to use the selected camera above"
                 onkeydown="if(event.key==='Enter') startTracking()">
             <button class="btn-start" onclick="startTracking()">&#9654; Start</button>
+            <button id="btnPause"  class="btn-pause"  onclick="pauseTracking()"  style="display:none">&#9646;&#9646; Pause</button>
+            <button id="btnResume" class="btn-resume" onclick="resumeTracking()" style="display:none">&#9654; Resume</button>
             <button class="btn-stop"  onclick="stopTracking()">&#9632; Stop</button>
             <button id="btnExitLine" class="btn-exit-on" onclick="toggleExitLine()" title="Toggle exit line">&#9135; Exit Line: ON</button>
+            <button id="btnRotate" class="btn-rot" onclick="rotateInput90()" title="Rotate input 90° counter-clockwise">&#8634; Rotate: 0°</button>
+        </div>
+
+        <div class="exit-line-row">
+            <span id="exitLineAxisLabel" class="axis-label">Exit line % from top</span>
+            <input type="range" id="exitLineSlider" min="5" max="95" value="85" step="1"
+                oninput="onExitLineSliderInput(this.value)"
+                onchange="onExitLineSliderCommit(this.value)">
+            <span id="exitLinePctLabel" class="pct-label">85%</span>
+            <button id="btnExitLineOrient" class="btn-exit-sub" data-vertical="0"
+                onclick="toggleExitLineOrientation()" title="Toggle horizontal/vertical exit line">
+                Orientation: Horizontal
+            </button>
+            <button id="btnExitLineInvert" class="btn-exit-sub" data-inverted="0"
+                onclick="toggleExitLineInvert()" title="Flip line direction for opposite conveyor flow">
+                Direction: Normal
+            </button>
         </div>
 
         <div class="stream-container">
@@ -222,7 +342,6 @@
         <div class="legend">
             <div class="leg-item"><span class="leg-dot" style="background:#3fb950"></span> OK (barcode)</div>
             <div class="leg-item"><span class="leg-dot" style="background:#f85149"></span> NOK (no barcode)</div>
-            <div class="leg-item"><span class="leg-dot" style="background:#d29922"></span> DEFECTIVE (fallen)</div>
             <div class="leg-item"><span class="leg-dot" style="background:#58a6ff"></span> Decision locked</div>
             <div class="leg-item"><span class="leg-dot" style="background:#00c8ff"></span> Date detection</div>
         </div>
@@ -245,10 +364,7 @@
                     <div class="stat-value c-nok" id="nok">0</div>
                     <div class="stat-label">NOK &#10007;</div>
                 </div>
-                <div class="stat-card">
-                    <div class="stat-value c-def" id="def">0</div>
-                    <div class="stat-label">DEFECTIVE &#9888;</div>
-                </div>
+
             </div>
         </div>
 
@@ -274,12 +390,62 @@
             <h3>FIFO Queue (last 10)</h3>
             <div class="fifo-box" id="fifo" style="flex:1;">(empty)</div>
         </div>
+
+        <div class="panel">
+            <h3 style="display:flex; align-items:center;">
+                DB Recording
+                <span id="dbBackendBadge" class="db-backend-badge db-backend-sqlite">SQLite</span>
+            </h3>
+            <div class="db-mini-grid">
+                <div class="db-mini-item">
+                    <div class="db-mini-val" id="dbNoBarcode">0</div>
+                    <div class="db-mini-label">No Barcode</div>
+                </div>
+                <div class="db-mini-item">
+                    <div class="db-mini-val" id="dbNoDate">0</div>
+                    <div class="db-mini-label">No Date</div>
+                </div>
+            </div>
+            <div class="db-session-id" id="dbSessionInfo">Recording OFF</div>
+            <button id="btnStatsToggle" class="db-btn db-btn-record-off" onclick="toggleStatsRecording()">
+                Recording: OFF
+            </button>
+                        <button class="btn-sessions" onclick="openSessionsModal()">View Saved Sessions</button>
+        </div>
+    </div>
+</div>
+
+<div class="modal-backdrop" id="sessionsModal" onclick="if(event.target===this) closeSessionsModal()">
+    <div class="modal">
+        <h2>Saved Sessions</h2>
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+            <div>
+                <div id="sessionsList" style="max-height:360px; overflow-y:auto; display:flex; flex-direction:column; gap:6px;">
+                    <div style="color:#8b949e; font-size:0.85em;">Loading…</div>
+                </div>
+            </div>
+            <div>
+                <div id="sessionDetailHeader" style="font-size:0.82em; color:#8b949e; margin-bottom:8px;">Select a session</div>
+                <div class="session-kpi-grid">
+                    <div class="session-kpi-card"><div class="session-kpi-val c-total" id="sdTotal">0</div><div class="session-kpi-label">Total</div></div>
+                    <div class="session-kpi-card"><div class="session-kpi-val c-ok" id="sdOk">0</div><div class="session-kpi-label">OK</div></div>
+                    <div class="session-kpi-card"><div class="session-kpi-val c-nok" id="sdNok">0</div><div class="session-kpi-label">NOK</div></div>
+                    <div class="session-kpi-card"><div class="session-kpi-val c-nok" id="sdNoBarcode">0</div><div class="session-kpi-label">No Barcode</div></div>
+                    <div class="session-kpi-card"><div class="session-kpi-val c-def" id="sdNoDate">0</div><div class="session-kpi-label">No Date</div></div>
+                    <div class="session-kpi-card"><div class="session-kpi-val c-ms" id="sdNokRate">0%</div><div class="session-kpi-label">NOK Rate</div></div>
+                </div>
+            </div>
+        </div>
+        <div style="display:flex; justify-content:flex-end; margin-top:12px;">
+            <button class="btn-modal-close" onclick="closeSessionsModal()">Close</button>
+        </div>
     </div>
 </div>
 
 <script>
     /* ─── Exit line toggle ─── */
     let exitLineEnabled = true;
+    let _exitLineSliderTimer = null;
 
     async function toggleExitLine() {
         const r = await fetch('/api/exit_line', { method: 'POST' });
@@ -295,10 +461,175 @@
         }
     }
 
+    async function rotateInput90() {
+        const r = await fetch('/api/rotate', { method: 'POST' });
+        const d = await r.json();
+        const deg = (d.rotation_deg || 0);
+        document.getElementById('btnRotate').textContent = '\u21b6 Rotate: ' + deg + '\u00b0';
+    }
+
+    function onExitLineSliderInput(val) {
+        document.getElementById('exitLinePctLabel').textContent = val + '%';
+    }
+
+    function onExitLineSliderCommit(val) {
+        document.getElementById('exitLinePctLabel').textContent = val + '%';
+        clearTimeout(_exitLineSliderTimer);
+        _exitLineSliderTimer = setTimeout(() => {
+            fetch('/api/exit_line_position', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ position: parseInt(val, 10) }),
+            }).catch((e) => console.error('exit line position failed:', e));
+        }, 40);
+    }
+
+    async function toggleExitLineOrientation() {
+        const r = await fetch('/api/exit_line_orientation', { method: 'POST' });
+        const d = await r.json();
+        _applyExitLineOrient(!!d.vertical);
+        _updateAxisLabel();
+    }
+
+    async function toggleExitLineInvert() {
+        const r = await fetch('/api/exit_line_invert', { method: 'POST' });
+        const d = await r.json();
+        _applyExitLineInvert(!!d.inverted);
+        _updateAxisLabel();
+    }
+
+    function _applyExitLineOrient(isVertical) {
+        const btn = document.getElementById('btnExitLineOrient');
+        btn.dataset.vertical = isVertical ? '1' : '0';
+        btn.textContent = isVertical ? 'Orientation: Vertical' : 'Orientation: Horizontal';
+        btn.style.color = isVertical ? '#f0883e' : '#c9d1d9';
+    }
+
+    function _applyExitLineInvert(isInverted) {
+        const btn = document.getElementById('btnExitLineInvert');
+        btn.dataset.inverted = isInverted ? '1' : '0';
+        btn.textContent = isInverted ? 'Direction: Inverted' : 'Direction: Normal';
+        btn.style.color = isInverted ? '#f0883e' : '#c9d1d9';
+        btn.style.borderColor = isInverted ? '#f0883e' : '#30363d';
+    }
+
+    function _updateAxisLabel() {
+        const isVertical = document.getElementById('btnExitLineOrient').dataset.vertical === '1';
+        const isInverted = document.getElementById('btnExitLineInvert').dataset.inverted === '1';
+        const label = document.getElementById('exitLineAxisLabel');
+        if (isVertical) {
+            label.textContent = 'Exit line % from ' + (isInverted ? 'right' : 'left');
+        } else {
+            label.textContent = 'Exit line % from ' + (isInverted ? 'bottom' : 'top');
+        }
+    }
+
     /* ─── State ─────────────────────────────── */
     let activeCheckpointId = null;
     let activeCameraId     = null;
     let isSwitching        = false;
+
+    async function toggleStatsRecording() {
+        const r = await fetch('/api/stats/toggle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        });
+        const d = await r.json();
+        applyStatsRecordingState(d.stats_active, d.session_id, d.db_available, d.db_backend);
+    }
+
+    function applyStatsRecordingState(isActive, sessionId, dbAvailable, backend) {
+        const btn = document.getElementById('btnStatsToggle');
+        const info = document.getElementById('dbSessionInfo');
+        const badge = document.getElementById('dbBackendBadge');
+        if (dbAvailable) {
+            const isPg = backend === 'postgres';
+            badge.textContent = isPg ? 'Postgres' : 'SQLite';
+            badge.className = 'db-backend-badge ' + (isPg ? 'db-backend-postgres' : 'db-backend-sqlite');
+        } else {
+            badge.textContent = 'Unavailable';
+            badge.className = 'db-backend-badge db-backend-sqlite';
+        }
+        btn.textContent = isActive ? 'Recording: ON' : 'Recording: OFF';
+        btn.className = 'db-btn ' + (isActive ? 'db-btn-record-on' : 'db-btn-record-off');
+        info.textContent = isActive ? ('Session: ' + (sessionId || 'pending')) : 'Recording OFF';
+    }
+
+    function closeSessionsModal() {
+        document.getElementById('sessionsModal').classList.remove('open');
+    }
+
+    async function openSessionsModal() {
+        document.getElementById('sessionsModal').classList.add('open');
+        const list = document.getElementById('sessionsList');
+        list.innerHTML = '<div style="color:#8b949e; font-size:0.85em;">Loading…</div>';
+
+        try {
+            const r = await fetch('/api/stats/sessions?limit=100');
+            const d = await r.json();
+            const sessions = d.sessions || [];
+            if (!sessions.length) {
+                list.innerHTML = '<div style="color:#8b949e; font-size:0.85em;">No saved sessions yet.</div>';
+                return;
+            }
+
+            list.innerHTML = '';
+            sessions.forEach((s, idx) => {
+                const total = Number(s.total || 0);
+                const ok = Number(s.ok_count || 0);
+                const nok = Math.max(0, total - ok);
+                const row = document.createElement('div');
+                row.className = 'session-row';
+                row.innerHTML =
+                    '<div style="display:flex; justify-content:space-between; gap:8px;">' +
+                        '<strong style="font-size:0.82em; color:#c9d1d9;">' + (s.started_at || 'unknown') + '</strong>' +
+                        '<span style="font-size:0.76em; color:#58a6ff;">T:' + total + ' OK:' + ok + ' NOK:' + nok + '</span>' +
+                    '</div>' +
+                    '<div class="session-id-mini">' + s.id + '</div>';
+
+                row.onclick = async () => {
+                    document.querySelectorAll('.session-row').forEach(el => el.classList.remove('active'));
+                    row.classList.add('active');
+                    await loadSessionDetails(s.id);
+                };
+
+                list.appendChild(row);
+
+                if (idx === 0) {
+                    row.classList.add('active');
+                    loadSessionDetails(s.id);
+                }
+            });
+        } catch (e) {
+            list.innerHTML = '<div style="color:#f85149; font-size:0.85em;">Failed to load sessions: ' + e + '</div>';
+        }
+    }
+
+    async function loadSessionDetails(sessionId) {
+        try {
+            const r = await fetch('/api/stats/session/' + encodeURIComponent(sessionId));
+            if (!r.ok) throw new Error('session not found');
+            const s = await r.json();
+            const total = Number(s.total || 0);
+            const ok = Number(s.ok_count || 0);
+            const nok = Math.max(0, total - ok);
+            const nb = Number(s.nok_no_barcode || 0);
+            const nd = Number(s.nok_no_date || 0);
+            const rate = total > 0 ? ((nok / total) * 100).toFixed(2) : '0.00';
+
+            document.getElementById('sessionDetailHeader').textContent =
+                'Session: ' + sessionId + ' | Start: ' + (s.started_at || '-');
+            document.getElementById('sdTotal').textContent = total;
+            document.getElementById('sdOk').textContent = ok;
+            document.getElementById('sdNok').textContent = nok;
+            document.getElementById('sdNoBarcode').textContent = nb;
+            document.getElementById('sdNoDate').textContent = nd;
+            document.getElementById('sdNokRate').textContent = rate + '%';
+        } catch (e) {
+            document.getElementById('sessionDetailHeader').textContent = 'Failed to load session details';
+        }
+    }
 
     /* ─── Bootstrap: load checkpoints + cameras ─── */
     async function loadSelectors() {
@@ -441,13 +772,24 @@
             .then(d => console.log(d));
     }
 
+    function pauseTracking() {
+        fetch('/api/pause', { method: 'POST' })
+            .then(r => r.json())
+            .then(d => console.log('Paused:', d));
+    }
+
+    function resumeTracking() {
+        fetch('/api/resume', { method: 'POST' })
+            .then(r => r.json())
+            .then(d => console.log('Resumed:', d));
+    }
+
     /* ─── Poll stats ─── */
     function updateStats() {
         fetch('/api/stats').then(r => r.json()).then(d => {
             document.getElementById('total').textContent = d.total_packets;
             document.getElementById('ok').textContent    = d.packages_ok;
             document.getElementById('nok').textContent   = d.packages_nok;
-            document.getElementById('def').textContent   = d.packages_defective;
             document.getElementById('vfps').textContent  = d.video_fps  || 0;
             document.getElementById('dfps').textContent  = d.det_fps    || 0;
             document.getElementById('ms').textContent    = d.inference_ms || 0;
@@ -467,6 +809,31 @@
                 btn.className   = exitLineEnabled ? 'btn-exit-on'      : 'btn-exit-off';
             }
 
+            if (typeof d.rotation_deg !== 'undefined') {
+                document.getElementById('btnRotate').textContent = '\u21b6 Rotate: ' + d.rotation_deg + '\u00b0';
+            }
+
+            if (typeof d.exit_line_vertical !== 'undefined') {
+                _applyExitLineOrient(!!d.exit_line_vertical);
+            }
+            if (typeof d.exit_line_inverted !== 'undefined') {
+                _applyExitLineInvert(!!d.exit_line_inverted);
+            }
+            if (typeof d.exit_line_pct !== 'undefined') {
+                const slider = document.getElementById('exitLineSlider');
+                const lbl = document.getElementById('exitLinePctLabel');
+                const pct = Number(d.exit_line_pct);
+                if (!Number.isNaN(pct) && String(slider.value) !== String(pct)) {
+                    slider.value = String(pct);
+                }
+                lbl.textContent = String(pct) + '%';
+            }
+            _updateAxisLabel();
+
+            applyStatsRecordingState(d.stats_active, d.session_id, d.db_available, d.db_backend);
+            document.getElementById('dbNoBarcode').textContent = d.nok_no_barcode || 0;
+            document.getElementById('dbNoDate').textContent = d.nok_no_date || 0;
+
             // Status dot
             const dot = document.getElementById('statusDot');
             const txt = document.getElementById('statusText');
@@ -474,9 +841,17 @@
                 dot.className = 'status-dot ended'; txt.textContent = 'Video ended';
             } else if (d.is_running) {
                 dot.className = 'status-dot running'; txt.textContent = 'Processing…';
+            } else if (d.is_paused) {
+                dot.className = 'status-dot paused'; txt.textContent = 'Paused';
             } else {
                 dot.className = 'status-dot'; txt.textContent = 'Idle';
             }
+
+            // Pause/Resume button visibility
+            const btnPause  = document.getElementById('btnPause');
+            const btnResume = document.getElementById('btnResume');
+            btnPause.style.display  = d.is_running ? '' : 'none';
+            btnResume.style.display = d.is_paused  ? '' : 'none';
 
             // FIFO
             const box = document.getElementById('fifo');
@@ -498,6 +873,7 @@
 
     /* ─── Init ─── */
     loadSelectors();
+    _updateAxisLabel();
     setInterval(updateStats, 400);
 </script>
 </body>

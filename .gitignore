@@ -14,6 +14,7 @@ test_env/
 *.pt
 *.onnx
 *.engine
+*.pth
 
 # ── Video files ──
 *.mp4
@@ -26,7 +27,7 @@ test_env/
 
 # ── Live images captured at runtime ──
 liveImages/
-
+anomalie/
 # ── IDE / Editor ──
 .vscode/
 .idea/

@@ -1,0 +1,8 @@
+scan,score,threshold,is_defective
+1,8416.87,5000.00,YES
+2,7743.59,5000.00,YES
+3,7994.07,5000.00,YES
+4,10355.42,5000.00,YES
+5,10006.67,5000.00,YES
+
+DECISION,NOK,defective_scans=5/5,strategy=MAJORITY
