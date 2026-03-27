@@ -159,6 +159,14 @@ class TrackingState:
         self._stats_active = False
         self._nok_no_barcode = 0
         self._nok_no_date = 0
+        self._nok_anomaly = 0
+        # Baselines captured when stats recording starts, so session
+        # totals reflect only the recording window.
+        self._session_baseline_total = 0
+        self._session_baseline_ok = 0
+
+        # ── Proof-image session (liveImages/<session>/<defect_type>/) ──
+        # Proof saves are gated on _stats_active; folder = _db_session_id
 
     # ─────────────────────────────────────────
 
@@ -468,6 +476,66 @@ class TrackingState:
             self._perf = self._empty_perf()
         self._nok_no_barcode = 0
         self._nok_no_date = 0
+        self._nok_anomaly = 0
+
+    # ─────────────────────────────────────────
+    # PROOF IMAGE SAVING (liveImages/<session>/<defect_type>/)
+    # ─────────────────────────────────────────
+
+    def _save_proof_image(self, pkt_num, defect_type, frame, bbox=None, session_id=None):
+        """Save a proof image of a defective packet.
+
+        Folder structure: liveImages/<session_id>/<defect_type>/packet_<N>.png
+        Only called when a stats recording session is active.
+        """
+        if not session_id:
+            return
+        base = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "liveImages", session_id, defect_type,
+        )
+        try:
+            os.makedirs(base, exist_ok=True)
+        except OSError:
+            return
+
+        img = frame
+        if bbox is not None:
+            x1, y1, x2, y2 = bbox
+            h, w = frame.shape[:2]
+            # Add 15% padding around the bbox for context
+            bw, bh = x2 - x1, y2 - y1
+            pad_x, pad_y = int(bw * 0.15), int(bh * 0.15)
+            x1, y1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
+            x2, y2 = min(w, x2 + pad_x), min(h, y2 + pad_y)
+            if x2 > x1 and y2 > y1:
+                img = frame[y1:y2, x1:x2]
+
+        img_path = os.path.join(base, f"packet_{pkt_num}.png")
+        try:
+            cv2.imwrite(img_path, img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
+        except Exception as e:
+            print(f"[PROOF] Failed to save {img_path}: {e}")
+
+    def _save_proof_image_bg(self, pkt_num, defect_type, frame, bbox=None):
+        """Fire-and-forget: save proof image in a background thread.
+
+        Only saves when a stats recording session is active.
+        Captures session_id at scheduling time so the image always lands
+        in the correct session folder even if recording is toggled.
+        """
+        if not self._stats_active or not self._db_session_id:
+            return
+        frame_copy = frame.copy()
+        session_now = self._db_session_id
+        threading.Thread(
+            target=self._save_proof_image,
+            args=(pkt_num, defect_type, frame_copy, bbox, session_now),
+            daemon=True,
+            name=f"Proof-{pkt_num}",
+        ).start()
+
+    # ─────────────────────────────────────────
 
     def set_stats_recording(self, active):
         active = bool(active)
@@ -488,6 +556,21 @@ class TrackingState:
             self._stats_active = True
             self._nok_no_barcode = 0
             self._nok_no_date = 0
+            self._nok_anomaly = 0
+            # Reset live counters so frontend display starts from 0 with the
+            # recording session — packet numbers, images and DB rows all align.
+            self.total_packets = 0
+            self.output_fifo = []
+            self.packages = {}
+            self.packet_numbers = {}
+            self.packets_crossed_line = set()
+            self._session_baseline_total = 0
+            self._session_baseline_ok = 0
+            with self._stats_lock:
+                self.stats["total_packets"] = 0
+                self.stats["packages_ok"] = 0
+                self.stats["packages_nok"] = 0
+                self.stats["fifo_queue"] = []
             return {"stats_active": True, "session_id": new_sid}
 
         if self._db_writer and self._db_session_id:
@@ -503,6 +586,7 @@ class TrackingState:
             "ok_count": self.output_fifo.count("OK"),
             "nok_no_barcode": self._nok_no_barcode,
             "nok_no_date": self._nok_no_date,
+            "nok_anomaly": self._nok_anomaly,
         }
 
     @staticmethod
@@ -697,6 +781,7 @@ class TrackingState:
         _pkt_numbers = dict(self.packet_numbers)
         _nok_bc = self._nok_no_barcode
         _nok_dt = self._nok_no_date
+        _nok_ano = self._nok_anomaly
 
         # Reset transient tracking state
         self.packages = {}
@@ -723,6 +808,7 @@ class TrackingState:
         self.packet_numbers = _pkt_numbers
         self._nok_no_barcode = _nok_bc
         self._nok_no_date = _nok_dt
+        self._nok_anomaly = _nok_ano
 
         ok = _fifo.count("OK")
         nok = _fifo.count("NOK")
@@ -878,8 +964,6 @@ class TrackingState:
 
         # 5. Warm up
         try:
-            import numpy as np
-            from tracking_config import CONFIG
             dummy = np.zeros((640, 640, 3), dtype=np.uint8)
             self.model(dummy, imgsz=CONFIG["imgsz"], verbose=False)
             if torch.cuda.is_available():
@@ -910,8 +994,12 @@ class TrackingState:
                 self.cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             elif self._is_video_file:
-                if not Path(src).exists():
-                    print(f"[READER] ERROR: File not found: {src}")
+                try:
+                    file_exists = Path(src).exists()
+                except (PermissionError, OSError):
+                    file_exists = False
+                if not file_exists:
+                    print(f"[READER] ERROR: File not found or not accessible: {src}")
                     self.is_running = False
                     return
                 self.cap = cv2.VideoCapture(src)
@@ -1320,12 +1408,19 @@ class TrackingState:
                                 self.packet_numbers[tid] = self.total_packets
                                 final = "NOK" if is_def else "OK"
                                 self.output_fifo.append(final)
+
+                                if self._stats_active and is_def:
+                                    self._nok_anomaly += 1
+
                                 print(f"[AD] Packet #{self.total_packets} -> {final} "
                                       f"(scans={len(tstate['results'])})")
 
                                 if is_def:
                                     self._save_nok_packet_bg(
                                         self.total_packets, tstate, cp)
+                                    self._save_proof_image_bg(
+                                        self.total_packets - self._session_baseline_total,
+                                        "anomaly", frame, (x1, y1, x2, y2))
 
                                 tstate['crops'] = []
                                 tstate['scores'] = []
@@ -1338,12 +1433,26 @@ class TrackingState:
                                     ):
                                         try:
                                             self._db_writer.write_queue.put_nowait({
-                                                "type": "snapshot",
+                                                "type": "session_update",
                                                 "session_id": self._db_session_id,
                                                 "total": self.total_packets,
                                                 "ok_count": self.output_fifo.count("OK"),
                                                 "nok_no_barcode": 0,
                                                 "nok_no_date": 0,
+                                                "nok_anomaly": self._nok_anomaly,
+                                            })
+                                        except Exception:
+                                            pass
+                                    # Record defective packet with timestamp for ejection
+                                    if is_def:
+                                        try:
+                                            from datetime import datetime
+                                            self._db_writer.write_queue.put_nowait({
+                                                "type": "crossing",
+                                                "session_id": self._db_session_id,
+                                                "packet_num": self.total_packets - self._session_baseline_total,
+                                                "defect_type": "anomaly",
+                                                "crossed_at": datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%f'),
                                             })
                                         except Exception:
                                             pass
@@ -1364,13 +1473,20 @@ class TrackingState:
                     ok = self.output_fifo.count("OK")
                     nok = self.output_fifo.count("NOK")
 
+                    # Build FIFO string from actual results (same as tracking mode)
+                    fifo_items = []
+                    for fi, fd in enumerate(self.output_fifo[-8:],
+                                            start=max(1, self.total_packets - 7)):
+                        fifo_items.append(f"#{fi}:{fd}")
+                    fifo_str = " | ".join(fifo_items) if fifo_items else "(anomaly mode)"
+
                     with self._overlay_lock:
                         self._overlay = {
                             'track_boxes': track_boxes,
                             'barcode_boxes': [],
                             'exit_line_y': self._exit_line_y,
                             'total_packets': self.total_packets,
-                            'fifo_str': '(anomaly mode)',
+                            'fifo_str': fifo_str,
                             'det_fps': det_fps,
                             'det_ms': det_ms,
                             'frame_idx': frame_idx,
@@ -1580,6 +1696,18 @@ class TrackingState:
                             pkg["final_decision"] = final
                             self.output_fifo.append(final)
 
+                            # Save proof image for defective packets
+                            if final == "NOK":
+                                if not has_bc:
+                                    defect_type = "nobarcode"
+                                elif require_date_for_ok and not has_dt:
+                                    defect_type = "nodate"
+                                else:
+                                    defect_type = "nobarcode"
+                                self._save_proof_image_bg(
+                                    self.total_packets - self._session_baseline_total,
+                                    defect_type, frame, (x1, y1, x2, y2))
+
                             # DB/session accounting is fully isolated: when
                             # recording is OFF, detection path does no DB work.
                             if self._stats_active:
@@ -1595,12 +1723,32 @@ class TrackingState:
                                 ):
                                     try:
                                         self._db_writer.write_queue.put_nowait({
-                                            "type": "snapshot",
+                                            "type": "session_update",
                                             "session_id": self._db_session_id,
                                             "total": self.total_packets,
                                             "ok_count": self.output_fifo.count("OK"),
                                             "nok_no_barcode": self._nok_no_barcode,
                                             "nok_no_date": self._nok_no_date,
+                                            "nok_anomaly": self._nok_anomaly,
+                                        })
+                                    except Exception:
+                                        pass
+
+                                # Record defective packet with timestamp for ejection
+                                if final == "NOK":
+                                    defect_type_db = "nobarcode"
+                                    if not has_bc:
+                                        defect_type_db = "nobarcode"
+                                    elif require_date_for_ok and not has_dt:
+                                        defect_type_db = "nodate"
+                                    try:
+                                        from datetime import datetime
+                                        self._db_writer.write_queue.put_nowait({
+                                            "type": "crossing",
+                                            "session_id": self._db_session_id,
+                                            "packet_num": self.total_packets - self._session_baseline_total,
+                                            "defect_type": defect_type_db,
+                                            "crossed_at": datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%f'),
                                         })
                                     except Exception:
                                         pass

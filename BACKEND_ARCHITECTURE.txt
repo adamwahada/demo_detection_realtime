@@ -1,0 +1,365 @@
+================================================================================
+  BACKEND ARCHITECTURE — demo_detection_realtime
+  Generated: 2026-03-27
+================================================================================
+
+================================================================================
+1. ENDPOINTS
+================================================================================
+
+METHOD  PATH                                    DESCRIPTION                                     REQUEST PARAMS                          RESPONSE FORMAT
+------  ----                                    -----------                                     --------------                          ---------------
+GET     /                                       Serves the main UI (templates/index.html)       —                                       HTML page
+GET     /video_feed                             MJPEG stream of annotated video frames          —                                       multipart/x-mixed-replace (JPEG stream)
+POST    /api/start                              Start video processing (reader, detector,       JSON: { "source": "<path_or_device>" }  JSON: { "status": "started", "source", "mode" }
+                                                compositor threads)
+POST    /api/stop                               Stop all processing threads                     —                                       JSON: { "status": "stopped" }
+POST    /api/pause                              Pause threads + save video position              —                                       JSON: { "status", "is_paused", "frame_pos" }
+POST    /api/resume                             Resume paused session from saved position       —                                       JSON: { "status", "is_paused" }
+GET     /api/stats                              Full live stats: packet counts, FPS,            —                                       JSON: { total_packets, packages_ok, packages_nok,
+                                                checkpoint, camera, exit line state,                                                      video_fps, det_fps, inference_ms, checkpoint_id,
+                                                recording state, NOK breakdown, perf                                                      checkpoint_label, checkpoint_mode, camera_id,
+                                                                                                                                          exit_line_enabled, exit_line_pct, rotation_deg,
+                                                                                                                                          perf: {}, is_paused, stats_active, session_id,
+                                                                                                                                          db_available, db_backend, nok_no_barcode,
+                                                                                                                                          nok_no_date, fifo_queue }
+GET     /api/perf                               Performance-only subset of stats               —                                       JSON: { checkpoint_id, checkpoint_mode, is_running,
+                                                                                                                                          frame_count, video_fps, det_fps, inference_ms, perf }
+GET     /api/stats/status                       Counters + recording state                     —                                       JSON: { stats_active, session_id, db_available,
+                                                                                                                                          db_backend, total, ok_count, nok_count,
+                                                                                                                                          nok_no_barcode, nok_no_date, nok_rate_pct }
+POST    /api/stats/toggle                       Toggle DB recording ON/OFF                     JSON: {} (body ignored)                  JSON: { stats_active, session_id, db_available, db_backend }
+GET     /api/stats/sessions                     List saved sessions from DB                    Query: ?limit=N (default 50, max 500)   JSON: { "sessions": [ { id, started_at, ended_at, ... } ] }
+GET     /api/stats/session/<session_id>         Get KPIs for one session                       —                                       JSON: { id, started_at, ended_at, total, ok_count, ... }
+GET     /api/stats/session/<id>/crossings       List defective packets for a session           Query: ?limit=N (default 5000)          JSON: { "crossings": [ { id, packet_num, defect_type, crossed_at } ] }
+GET/POST /api/config                            GET: return CONFIG dict. POST: update keys     POST JSON: { "conf_paquet": 0.5, ... }  JSON: CONFIG dict
+GET     /api/fifo                               Raw FIFO queue of last decisions               —                                       JSON: { "fifo": ["OK","NOK",...], "total_packets": N }
+POST    /api/exit_line                          Toggle exit line display ON/OFF                —                                       JSON: { "enabled": bool }
+POST    /api/exit_line_orientation              Toggle horizontal/vertical exit line           —                                       JSON: { "vertical": bool, "orientation": str }
+POST    /api/exit_line_invert                   Flip direction (for opposite conveyor flow)    —                                       JSON: { "inverted": bool }
+POST    /api/exit_line_position                 Set exit line position as % (5–95)             JSON: { "position": int }               JSON: { "position_pct": int, "exit_line_y": int }
+POST    /api/rotate                             Cycle input rotation by 90° CCW                —                                       JSON: { "rotation_deg": int }
+GET     /api/checkpoints                        List available model checkpoints               —                                       JSON: { "checkpoints": [...], "active_id": str }
+GET     /api/cameras                            List available cameras                         —                                       JSON: { "cameras": [...], "active_id": str }
+POST    /api/switch                             Switch checkpoint and/or camera                JSON: { "checkpoint_id": str,            JSON: { "status", "checkpoint_id", "camera_id", "source" }
+                                                                                                "camera_id": str,
+                                                                                                "custom_source": str } (all optional)
+
+
+================================================================================
+2. VIDEO STREAMING MECHANISM
+================================================================================
+
+Protocol: MJPEG (Motion JPEG over HTTP multipart)
+
+How it works:
+1. The /video_feed endpoint returns a Response with mimetype
+   'multipart/x-mixed-replace; boundary=frame'.
+2. A Python generator function runs in an infinite loop:
+   - Reads `state._jpeg_bytes` (protected by `state._jpeg_lock`)
+   - If None, uses a black placeholder with "Waiting for stream..." text
+   - Yields each frame as a multipart chunk:
+     `--frame\r\nContent-Type: image/jpeg\r\nContent-Length: N\r\n\r\n<bytes>\r\n`
+   - Sleeps 66ms between frames (~15 fps delivery rate)
+3. The JPEG bytes are produced by a COMPOSITOR THREAD (`_compositor_loop`)
+   running in TrackingState. This thread:
+   - Takes the latest raw frame from the reader
+   - Overlays detection boxes, exit line, labels, and stats
+   - Encodes the annotated frame as JPEG using cv2.imencode(.jpg, quality=80)
+   - Writes the bytes to `state._jpeg_bytes` under a lock
+4. The compositor is decoupled from both the video reader and YOLO detector.
+   The reader runs at camera FPS, the detector at YOLO inference speed,
+   and the compositor at its own rate. They communicate via shared state
+   (latest frame, latest detections).
+
+Frontend:
+   <img src="/video_feed"> — a simple <img> tag whose src is the MJPEG URL.
+   The browser natively handles multipart/x-mixed-replace by replacing the
+   image continuously. No JavaScript, WebSocket, or canvas involved.
+
+Headers: Cache-Control: no-cache, X-Accel-Buffering: no (for nginx proxy compat).
+
+
+================================================================================
+3. SESSION LIFECYCLE
+================================================================================
+
+A "session" is a recording period where stats are persisted to the database.
+Sessions are independent from the video processing threads.
+
+Step-by-step:
+
+ 1. USER CLICKS "Recording: OFF" BUTTON
+    ↓
+    Frontend calls POST /api/stats/toggle
+    ↓
+    Backend calls state.set_stats_recording(True)
+
+ 2. set_stats_recording(True):
+    a. Starts the DBWriter background thread if not already running
+    b. Calls db_writer.open_session(checkpoint_id, camera_source)
+       → INSERTs a new row into `sessions` table with a UUID, started_at timestamp
+    c. Sets _db_session_id = the new UUID
+    d. Sets _stats_active = True
+    e. RESETS all live counters to 0:
+       - total_packets, output_fifo, packages, packet_numbers, packets_crossed_line
+       - _nok_no_barcode, _nok_no_date, _nok_anomaly
+       - stats dict (total_packets, packages_ok, packages_nok, fifo_queue)
+    f. Returns { stats_active: true, session_id: "<uuid>" }
+
+ 3. WHILE RECORDING IS ACTIVE:
+    - Every time a packet crosses the exit line, the detection loop:
+      a. Increments total_packets
+      b. Determines OK/NOK based on barcode/date/anomaly presence
+      c. If NOK: increments the appropriate _nok_* counter (only when _stats_active)
+      d. If NOK: saves a proof image to liveImages/<session_id>/<defect_type>/packet_N.png
+      e. If NOK: enqueues a "crossing" event to the DB writer (defect_type + crossed_at timestamp)
+      f. Every SNAPSHOT_EVERY_N_PACKETS (25) packets: enqueues a "session_update" event
+         → DBWriter UPDATEs the sessions row with running totals (total, ok_count, nok_*)
+         → This means on a crash, the last-known state is preserved (not zeroes)
+
+ 4. USER CLICKS "Recording: ON" BUTTON (to stop)
+    ↓
+    Frontend calls POST /api/stats/toggle again
+    ↓
+    Backend calls state.set_stats_recording(False)
+
+ 5. set_stats_recording(False):
+    a. Calls db_writer.close_session(session_id, totals={total, ok_count, nok_*})
+       → UPDATEs the sessions row with final totals + ended_at timestamp
+    b. Calls db_writer.set_active(False)
+    c. Clears _db_session_id = None, _stats_active = False
+
+ 6. NOTE: Recording is INDEPENDENT of video start/stop.
+    - You can start/stop recording while video is running.
+    - You can start/stop video while recording is active (counters reset on new recording).
+    - On graceful shutdown (atexit/SIGTERM): if recording is active, it auto-closes the session.
+    - On crash: zombie sessions (ended_at IS NULL) are stamped "interrupted:<timestamp>" on next startup.
+
+
+================================================================================
+4. DATA FLOW — Packet from Camera to Database
+================================================================================
+
+ 1. CAMERA FRAME CAPTURE
+    VideoReader thread (_reader_loop) captures frames from the source
+    (webcam device, RTSP URL, or video file) using OpenCV VideoCapture.
+    Each frame is rotated if configured, then stored in shared state.
+
+ 2. YOLO INFERENCE
+    YOLODetector thread (_detection_loop) picks up the latest frame.
+    Depending on the active checkpoint mode:
+
+    MODE = "tracking":
+      - Runs YOLO with ByteTrack persist=True (tracked objects)
+      - For each tracked package: checks if a barcode overlaps (IoU/inside ≥ thresholds)
+      - Optionally checks if a date overlaps (if checkpoint has require_date_for_ok)
+      - Optionally runs a secondary date model for better accuracy
+      - Each package gets: { "barcode_detected": bool, "date_detected": bool }
+
+    MODE = "anomaly":
+      - Runs YOLO segmentation model to detect packages on conveyor
+      - Tracks packages across frames; defines a scanning zone (zone_start_pct to zone_end_pct)
+      - For each package inside the zone: crops the masked region and feeds it to EfficientAD
+        (teacher-student + autoencoder anomaly detection) which returns an anomaly score
+      - Accumulates up to ad_max_scans per package
+      - At the exit line: makes a final MAJORITY/MAX/MEAN decision on anomaly vs normal
+
+    MODE = "date":
+      - Simple overlay mode — draws all detected classes with no tracking/decisions.
+      - No OK/NOK logic.
+
+ 3. EXIT LINE CROSSING (decision point)
+    When a package crosses the exit line (configurable position, orientation, direction):
+    a. total_packets is incremented
+    b. OK/NOK decision is locked:
+       - Tracking mode: OK = has_barcode AND (has_date OR date not required)
+       - Anomaly mode: OK = not anomalous (based on EfficientAD scores)
+    c. Decision is appended to output_fifo (["OK", "NOK", "OK", ...])
+
+ 4. IF RECORDING IS ACTIVE (_stats_active == True):
+    a. NOK counters are incremented: _nok_no_barcode, _nok_no_date, or _nok_anomaly
+    b. Proof image is saved in background thread:
+       → liveImages/<session_id>/<nobarcode|nodate|anomaly>/packet_<N>.png
+       → Session ID is captured at scheduling time (no cross-session leakage)
+    c. A "crossing" event is put on the DBWriter queue:
+       { type: "crossing", session_id, packet_num, defect_type, crossed_at }
+       → crossed_at is microsecond-precision timestamp for ejection synchronization
+    d. Every 25th packet, a "session_update" event is put on the queue:
+       { type: "session_update", session_id, total, ok_count, nok_no_barcode, nok_no_date, nok_anomaly }
+
+ 5. DB WRITER THREAD (background)
+    DBWriter._run() loop picks events from the queue:
+    - "session_update" → UPDATE sessions SET total=?, ok_count=?, nok_*=? WHERE id=?
+    - "crossing" → INSERT INTO defective_packets (session_id, packet_num, defect_type, crossed_at)
+
+ 6. IF RECORDING IS NOT ACTIVE:
+    Detection still runs (exit line decisions work, FIFO fills, total_packets increments),
+    but NO database writes, NO proof images, NO NOK counter increments.
+
+ 7. COMPOSITOR
+    Runs independently — takes the latest frame + detections and draws:
+    - Bounding boxes (green=OK, red=NOK, cyan=scanning, blue=locked)
+    - Exit line overlay
+    - FPS/inference badges
+    - Encodes to JPEG → state._jpeg_bytes → served via /video_feed
+
+
+================================================================================
+5. DATABASE
+================================================================================
+
+Backend: PostgreSQL (primary) with SQLite fallback.
+- PostgreSQL: host=localhost, port=5434, db=farine_detection
+- SQLite: data/tracking_demo.db (auto-created)
+- On startup, DBWriter tries PG first; if unreachable, falls back to SQLite.
+- Both backends have identical schemas. Tables are auto-created.
+
+TABLE: sessions
+  id              TEXT PRIMARY KEY     — UUID assigned when recording starts
+  started_at      TEXT                 — ISO timestamp when recording started
+  ended_at        TEXT                 — ISO timestamp when recording stopped (NULL = still active or crashed)
+  checkpoint_id   TEXT DEFAULT ''      — active model checkpoint id at session start
+  camera_source   TEXT DEFAULT ''      — video source used
+  total           INTEGER DEFAULT 0    — total packets counted during session
+  ok_count        INTEGER DEFAULT 0    — packets classified as OK
+  nok_no_barcode  INTEGER DEFAULT 0    — NOK due to missing barcode
+  nok_no_date     INTEGER DEFAULT 0    — NOK due to missing date
+  nok_anomaly     INTEGER DEFAULT 0    — NOK due to anomaly detection
+
+  Written: once on session open (INSERT), updated every 25 packets (UPDATE running totals),
+           once on session close (UPDATE final totals + ended_at).
+
+TABLE: defective_packets
+  id              SERIAL/AUTOINCREMENT — auto-incrementing primary key
+  session_id      TEXT                 — FK to sessions.id
+  packet_num      INTEGER NOT NULL     — session-relative packet number (matches image filename)
+  defect_type     TEXT NOT NULL        — "nobarcode", "nodate", or "anomaly"
+  crossed_at      TEXT NOT NULL        — microsecond ISO timestamp of exit-line crossing
+
+  Written: once per NOK packet, at the moment it crosses the exit line.
+
+INDEX: idx_defective_session ON defective_packets (session_id)
+
+NOTE: There is NO per-frame record. There is NO confidence score column.
+      There is NO image path column (path is derived: liveImages/<session_id>/<defect_type>/packet_<N>.png).
+
+
+================================================================================
+6. MODEL CHECKPOINTS
+================================================================================
+
+ID               LABEL                              MODE        WHAT IT DOES
+----             -----                              ----        -----------
+tracking         Tracking Paquet+Detection          tracking    ByteTrack + barcode detection
+date             Date Detection                     date        Simple date overlay (no decisions)
+barcode_date     Tracking Paquet+Barcode+Date       tracking    ByteTrack + barcode + date + secondary date model
+anomaly          Segmentation + Anomaly Detection   anomaly     YOLO segmentation + EfficientAD anomaly
+
+KEY THRESHOLDS:
+- conf_paquet: 0.45 (YOLO confidence for package detection)
+- conf_barcode: 0.45 (YOLO confidence for barcode detection)
+- conf_date: 0.30 (YOLO confidence for date detection)
+- barcode_match_inside_min: 0.60 (barcode must be 60% inside package bbox)
+- ad_thresh: 5000.0 (EfficientAD anomaly score threshold)
+- ad_strategy: MAJORITY (majority of scans must be anomalous)
+- ad_max_scans: 5 (max EfficientAD evaluations per package)
+- exit_line_ratio: 0.15 (default exit line at 15% from top)
+
+
+================================================================================
+7. FRONTEND (index.html) — How It Works
+================================================================================
+
+VIDEO: <img src="/video_feed"> — native browser MJPEG rendering.
+
+START/STOP: Buttons call fetch('/api/start', { method:'POST', body: {source} }),
+            fetch('/api/stop'), fetch('/api/pause'), fetch('/api/resume').
+            Source is taken from a text input or defaults to the active camera.
+
+LIVE STATS: Polling via setInterval(updateStats, 400) — every 400ms.
+            updateStats() calls GET /api/stats and updates DOM elements.
+            No WebSocket, no SSE. Pure HTTP polling at 2.5 Hz.
+
+RECORDING TOGGLE: Button calls POST /api/stats/toggle.
+
+SESSION HISTORY: "View Saved Sessions" button opens a modal.
+                 Modal fetches GET /api/stats/sessions?limit=100.
+                 Clicking a session row fetches GET /api/stats/session/<id>.
+
+CHECKPOINT/CAMERA SWITCH: Dropdown onChange calls POST /api/switch.
+                          Shows a loading overlay during model swap.
+
+EXIT LINE CONTROLS: Slider commits via POST /api/exit_line_position.
+                    Toggle buttons for orientation, direction, on/off.
+
+
+================================================================================
+8. WHAT IS NOT YET POSSIBLE (and what would need to be added)
+================================================================================
+
+─── A. Starting a session automatically at a scheduled time ───
+
+Currently: Everything is manual. The user clicks "Start" to open a video source,
+           then clicks "Recording: OFF" to start a DB session. There is no
+           scheduler, no cron integration, no time-based trigger.
+
+What's needed:
+  1. A scheduler (e.g., APScheduler, celery-beat, or a simple cron job)
+     that at a configured time calls the equivalent of:
+       POST /api/start  { source: "<camera>" }
+       POST /api/stats/toggle  (to start recording)
+  2. A corresponding schedule to stop:
+       POST /api/stats/toggle  (to stop recording)
+       POST /api/stop
+  3. A configuration store for schedules (DB table or config file).
+  4. The existing API endpoints are sufficient — no new routes needed,
+     just an automated caller.
+
+─── B. Exposing session history via REST for a separate frontend ───
+
+Currently: The endpoints ALREADY EXIST:
+  - GET /api/stats/sessions          → list of sessions
+  - GET /api/stats/session/<id>      → single session KPIs
+  - GET /api/stats/session/<id>/crossings → defective packet list
+
+What's needed for a separate frontend:
+  1. CORS headers — the Flask app does not set Access-Control-Allow-Origin.
+     Add flask-cors or manually set headers so a React app on another
+     port/domain can call these endpoints.
+  2. That's it. The data is already there and queryable.
+
+─── C. Exposing live stats via REST or WebSocket for a separate frontend ───
+
+Currently: Live stats are available via GET /api/stats (HTTP polling).
+           The built-in UI polls at 400ms intervals. This works but:
+
+What's needed for a separate frontend:
+  1. CORS headers (same as above).
+  2. The REST endpoint already works for polling. A React dashboard can
+     poll GET /api/stats at whatever interval it wants.
+  3. For real-time push (optional improvement):
+     - WebSocket (flask-socketio or similar): emit stats on each update
+       instead of waiting for poll. Would give sub-100ms latency.
+     - SSE (Server-Sent Events): simpler than WebSocket. Flask can yield
+       events on a streaming endpoint. Good for one-way push.
+  4. For the defective packet stream specifically:
+     - Currently, crossings are only queryable after-the-fact via
+       GET /api/stats/session/<id>/crossings.
+     - A WebSocket/SSE channel that pushes each crossing event in
+       real-time as it happens would enable live alerts and ejection
+       coordination from the dashboard.
+
+─── D. Other gaps for a production dashboard ───
+
+  1. No authentication — all endpoints are open. Add JWT or session auth.
+  2. No pagination on /api/stats/sessions beyond a limit param.
+  3. No filtering (by date range, checkpoint, camera).
+  4. No image serving endpoint — proof images are on disk but not exposed
+     via HTTP. Would need a static file route or a dedicated endpoint:
+       GET /api/proof/<session_id>/<defect_type>/packet_<N>.png
+  5. No anomaly score stored in DB — only the binary decision (defect_type).
+     If the dashboard needs to show score distributions, the schema would
+     need a confidence/score column on defective_packets.
+  6. No per-frame data — only per-packet (exit-line crossing) events.
+     Frame-level telemetry (FPS, GPU usage over time) is not persisted.

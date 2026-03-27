@@ -41,21 +41,19 @@ CREATE TABLE IF NOT EXISTS sessions (
     total           INTEGER DEFAULT 0,
     ok_count        INTEGER DEFAULT 0,
     nok_no_barcode  INTEGER DEFAULT 0,
-    nok_no_date     INTEGER DEFAULT 0
+    nok_no_date     INTEGER DEFAULT 0,
+    nok_anomaly     INTEGER DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS stats_snapshots (
+CREATE TABLE IF NOT EXISTS defective_packets (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id      TEXT,
-    captured_at     TEXT,
-    total           INTEGER DEFAULT 0,
-    ok_count        INTEGER DEFAULT 0,
-    nok_no_barcode  INTEGER DEFAULT 0,
-    nok_no_date     INTEGER DEFAULT 0,
-    nok_rate        REAL DEFAULT 0.0
+    packet_num      INTEGER NOT NULL,
+    defect_type     TEXT NOT NULL,
+    crossed_at      TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_snapshots_session ON stats_snapshots (session_id);
+CREATE INDEX IF NOT EXISTS idx_defective_session ON defective_packets (session_id);
 """
 
 
@@ -93,6 +91,8 @@ class DBWriter:
                     password=DB_PASSWORD,
                     connect_timeout=2,
                 )
+                # Auto-create missing tables in PostgreSQL
+                self._ensure_pg_tables(conn)
                 conn.close()
                 print("[DBWriter] Backend: PostgreSQL")
                 return "postgres"
@@ -102,15 +102,81 @@ class DBWriter:
             print("[DBWriter] psycopg2 not installed; using SQLite fallback.")
         return "sqlite"
 
+    @staticmethod
+    def _ensure_pg_tables(conn):
+        """Create tables in PostgreSQL if they don't exist yet."""
+        ddl = """
+        CREATE TABLE IF NOT EXISTS sessions (
+            id              TEXT PRIMARY KEY,
+            started_at      TEXT,
+            ended_at        TEXT,
+            checkpoint_id   TEXT DEFAULT '',
+            camera_source   TEXT DEFAULT '',
+            total           INTEGER DEFAULT 0,
+            ok_count        INTEGER DEFAULT 0,
+            nok_no_barcode  INTEGER DEFAULT 0,
+            nok_no_date     INTEGER DEFAULT 0,
+            nok_anomaly     INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS defective_packets (
+            id              SERIAL PRIMARY KEY,
+            session_id      TEXT REFERENCES sessions(id),
+            packet_num      INTEGER NOT NULL,
+            defect_type     TEXT NOT NULL,
+            crossed_at      TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_defective_session ON defective_packets (session_id);
+        """
+        try:
+            with conn.cursor() as cur:
+                cur.execute(ddl)
+            conn.commit()
+        except Exception as e:
+            print(f"[DBWriter] _ensure_pg_tables error: {e}")
+            conn.rollback()
+
     def _init_sqlite(self):
         os.makedirs(os.path.dirname(_SQLITE_PATH), exist_ok=True)
         conn = sqlite3.connect(_SQLITE_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SQLITE_SCHEMA)
+        # Migrate existing databases: add nok_anomaly if not present
+        for alter in [
+            "ALTER TABLE sessions ADD COLUMN nok_anomaly INTEGER DEFAULT 0",
+        ]:
+            try:
+                conn.execute(alter)
+            except Exception:
+                pass  # column already exists
         conn.commit()
         self._sqlite_conn = conn
         print(f"[DBWriter] SQLite database: {_SQLITE_PATH}")
+        self._close_zombie_sessions_sqlite()
+
+    def _close_zombie_sessions_sqlite(self):
+        """Mark sessions that were never closed (server crash / kill) as interrupted."""
+        try:
+            with self._sqlite_lock:
+                self._sqlite_conn.execute(
+                    "UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL",
+                    ("interrupted:" + _ts(),),
+                )
+                self._sqlite_conn.commit()
+        except Exception as e:
+            print(f"[DBWriter] zombie-session cleanup error: {e}")
+
+    def close_zombie_sessions_pg(self, conn):
+        """Mark sessions that were never closed (server crash / kill) as interrupted."""
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE sessions SET ended_at = %s WHERE ended_at IS NULL",
+                    ("interrupted:" + _ts(),),
+                )
+            conn.commit()
+        except Exception as e:
+            print(f"[DBWriter] zombie-session cleanup (PG) error: {e}")
 
     def start(self):
         if not self._available or (self._thread and self._thread.is_alive()):
@@ -165,6 +231,11 @@ class DBWriter:
             try:
                 conn = self._get_pg_conn()
                 if conn:
+                    # Mark any zombie sessions from a previous crash
+                    try:
+                        self.close_zombie_sessions_pg(conn)
+                    except Exception:
+                        pass
                     with conn.cursor() as cur:
                         cur.execute(
                             "INSERT INTO sessions (id, started_at, checkpoint_id, camera_source) VALUES (%s, %s, %s, %s)",
@@ -193,6 +264,7 @@ class DBWriter:
             totals.get("ok_count", 0),
             totals.get("nok_no_barcode", 0),
             totals.get("nok_no_date", 0),
+            totals.get("nok_anomaly", 0),
             session_id,
         )
         if self._backend == "postgres":
@@ -201,7 +273,7 @@ class DBWriter:
                 if conn:
                     with conn.cursor() as cur:
                         cur.execute(
-                            "UPDATE sessions SET ended_at=%s, total=%s, ok_count=%s, nok_no_barcode=%s, nok_no_date=%s WHERE id=%s",
+                            "UPDATE sessions SET ended_at=%s, total=%s, ok_count=%s, nok_no_barcode=%s, nok_no_date=%s, nok_anomaly=%s WHERE id=%s",
                             params,
                         )
                     conn.commit()
@@ -211,7 +283,7 @@ class DBWriter:
         else:
             with self._sqlite_lock:
                 self._sqlite_conn.execute(
-                    "UPDATE sessions SET ended_at=?, total=?, ok_count=?, nok_no_barcode=?, nok_no_date=? WHERE id=?",
+                    "UPDATE sessions SET ended_at=?, total=?, ok_count=?, nok_no_barcode=?, nok_no_date=?, nok_anomaly=? WHERE id=?",
                     params,
                 )
                 self._sqlite_conn.commit()
@@ -245,7 +317,7 @@ class DBWriter:
             return []
         sql = (
             "SELECT id, started_at, ended_at, checkpoint_id, camera_source, total, ok_count, "
-            "nok_no_barcode, nok_no_date FROM sessions ORDER BY started_at DESC LIMIT "
+            "nok_no_barcode, nok_no_date, nok_anomaly FROM sessions ORDER BY started_at DESC LIMIT "
         )
         if self._backend == "postgres":
             try:
@@ -263,12 +335,12 @@ class DBWriter:
             cur = self._sqlite_conn.execute(sql + "?", (limit,))
             return [dict(r) for r in cur.fetchall()]
 
-    def list_snapshots(self, session_id, limit=500):
+    def list_crossings(self, session_id, limit=5000):
         if not self._available or not session_id:
             return []
         sql = (
-            "SELECT id, session_id, captured_at, total, ok_count, nok_no_barcode, nok_no_date, nok_rate "
-            "FROM stats_snapshots WHERE session_id = "
+            "SELECT id, session_id, packet_num, defect_type, crossed_at "
+            "FROM defective_packets WHERE session_id = "
         )
         if self._backend == "postgres":
             try:
@@ -276,14 +348,14 @@ class DBWriter:
                 if not conn:
                     return []
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                    cur.execute(sql + "%s ORDER BY captured_at ASC LIMIT %s", (session_id, limit))
+                    cur.execute(sql + "%s ORDER BY packet_num ASC LIMIT %s", (session_id, limit))
                     return [dict(r) for r in cur.fetchall()]
             except Exception as e:
-                print(f"[DBWriter] list_snapshots error: {e}")
+                print(f"[DBWriter] list_crossings error: {e}")
                 self._pg_conn = None
                 return []
         with self._sqlite_lock:
-            cur = self._sqlite_conn.execute(sql + "? ORDER BY captured_at ASC LIMIT ?", (session_id, limit))
+            cur = self._sqlite_conn.execute(sql + "? ORDER BY packet_num ASC LIMIT ?", (session_id, limit))
             return [dict(r) for r in cur.fetchall()]
 
     def _run(self):
@@ -301,41 +373,70 @@ class DBWriter:
                 continue
 
             try:
-                if event.get("type") == "snapshot":
-                    self._write_snapshot(event)
+                if event.get("type") == "session_update":
+                    self._update_session_live(event)
+                elif event.get("type") == "crossing":
+                    self._write_crossing(event)
             except Exception as e:
                 print(f"[DBWriter] Event write error: {e}")
                 self._pg_conn = None
 
             self.write_queue.task_done()
 
-    def _write_snapshot(self, ev):
-        total = ev.get("total", 0)
-        nok = total - ev.get("ok_count", 0)
-        rate = round(nok / total * 100, 2) if total > 0 else 0.0
+    def _update_session_live(self, ev):
+        """UPDATE the sessions row with latest running totals (called every N packets).
+
+        Dashboard sees live numbers; crash leaves last-known state instead of zeroes.
+        """
         params = (
-            ev.get("session_id"),
-            _ts(),
-            total,
+            ev.get("total", 0),
             ev.get("ok_count", 0),
             ev.get("nok_no_barcode", 0),
             ev.get("nok_no_date", 0),
-            rate,
-        )
-        sql = (
-            "INSERT INTO stats_snapshots (session_id, captured_at, total, ok_count, "
-            "nok_no_barcode, nok_no_date, nok_rate) VALUES "
+            ev.get("nok_anomaly", 0),
+            ev.get("session_id"),
         )
         if self._backend == "postgres":
             conn = self._get_pg_conn()
             if not conn:
                 return
             with conn.cursor() as cur:
-                cur.execute(sql + "(%s,%s,%s,%s,%s,%s,%s)", params)
+                cur.execute(
+                    "UPDATE sessions SET total=%s, ok_count=%s, nok_no_barcode=%s, "
+                    "nok_no_date=%s, nok_anomaly=%s WHERE id=%s",
+                    params,
+                )
             conn.commit()
         else:
             with self._sqlite_lock:
-                self._sqlite_conn.execute(sql + "(?,?,?,?,?,?,?)", params)
+                self._sqlite_conn.execute(
+                    "UPDATE sessions SET total=?, ok_count=?, nok_no_barcode=?, "
+                    "nok_no_date=?, nok_anomaly=? WHERE id=?",
+                    params,
+                )
+                self._sqlite_conn.commit()
+
+    def _write_crossing(self, ev):
+        params = (
+            ev.get("session_id"),
+            ev.get("packet_num", 0),
+            ev.get("defect_type", "unknown"),
+            ev.get("crossed_at", _ts()),
+        )
+        sql = (
+            "INSERT INTO defective_packets (session_id, packet_num, "
+            "defect_type, crossed_at) VALUES "
+        )
+        if self._backend == "postgres":
+            conn = self._get_pg_conn()
+            if not conn:
+                return
+            with conn.cursor() as cur:
+                cur.execute(sql + "(%s,%s,%s,%s)", params)
+            conn.commit()
+        else:
+            with self._sqlite_lock:
+                self._sqlite_conn.execute(sql + "(?,?,?,?)", params)
                 self._sqlite_conn.commit()
 
     def _get_pg_conn(self):

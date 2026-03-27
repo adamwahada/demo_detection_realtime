@@ -9,12 +9,16 @@ All logic is split into separate modules:
   - templates/index.html: web UI
 """
 
+import atexit
+import signal
 import time
 import logging
+from pathlib import Path
 
 import cv2
 import numpy as np
-from flask import Flask, jsonify, request, Response, render_template
+from flask import Flask, jsonify, request, Response, render_template, send_file
+from flask_cors import CORS
 from ultralytics import YOLO
 
 from tracking_config import (
@@ -32,6 +36,8 @@ from tracking_state import TrackingState
 # ==========================
 app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
+CORS(app, resources={r"/api/*": {"origins": "*"},
+                     r"/video_feed": {"origins": "*"}})
 
 # ==========================
 # GLOBAL STATE
@@ -266,13 +272,27 @@ def api_stats_session(session_id):
     return jsonify(data)
 
 
-@app.route('/api/stats/session/<session_id>/snapshots')
-def api_stats_session_snapshots(session_id):
+@app.route('/api/stats/session/<session_id>/crossings')
+def api_stats_session_crossings(session_id):
     if state._db_writer is None:
-        return jsonify({"snapshots": []})
-    limit = request.args.get('limit', default=500, type=int)
-    rows = state._db_writer.list_snapshots(session_id, limit=max(1, min(limit, 5000)))
-    return jsonify({"snapshots": rows})
+        return jsonify({"crossings": []})
+    limit = request.args.get('limit', default=5000, type=int)
+    rows = state._db_writer.list_crossings(session_id, limit=max(1, min(limit, 10000)))
+    return jsonify({"crossings": rows})
+
+
+@app.route('/api/proof/<session_id>/<defect_type>/<int:packet_num>')
+def api_proof_image(session_id, defect_type, packet_num):
+    """Serve a proof image for a defective packet."""
+    if defect_type not in ("nobarcode", "nodate", "anomaly"):
+        return jsonify({"error": "invalid defect_type"}), 400
+    base = Path(__file__).parent / "liveImages" / session_id / defect_type
+    img_path = base / f"packet_{packet_num}.png"
+    if not img_path.is_file():
+        return jsonify({"error": "image not found"}), 404
+    resp = send_file(img_path, mimetype="image/png")
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 @app.route('/api/config', methods=['GET', 'POST'])
@@ -441,6 +461,30 @@ def api_switch():
 # ==========================
 # MAIN
 # ==========================
+def _shutdown():
+    """Graceful shutdown: close any open stats session so its totals are saved."""
+    try:
+        if getattr(state, '_stats_active', False):
+            print("[SHUTDOWN] Closing active stats session...")
+            state.set_stats_recording(False)
+    except Exception as e:
+        print(f"[SHUTDOWN] Error closing session: {e}")
+    try:
+        if state.is_running:
+            state.stop_processing()
+    except Exception:
+        pass
+    try:
+        if state._db_writer:
+            state._db_writer.stop()
+    except Exception:
+        pass
+
+atexit.register(_shutdown)
+for _sig in (signal.SIGTERM, signal.SIGINT):
+    signal.signal(_sig, lambda s, f: (_shutdown(), exit(0)))
+
+
 if __name__ == '__main__':
     init_models()
     print("\n" + "=" * 60)

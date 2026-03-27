@@ -1,0 +1,22 @@
+services:
+  farine_detection_db:
+    build:
+      context: .
+      dockerfile: Dockerfile.db
+    image: farine-detection-db:16
+    container_name: farine_detection_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-farine_detection}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "5434:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./db_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME:-farine_detection}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

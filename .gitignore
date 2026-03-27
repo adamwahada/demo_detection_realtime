@@ -28,6 +28,7 @@ test_env/
 # ── Live images captured at runtime ──
 liveImages/
 anomalie/
+data/
 # ── IDE / Editor ──
 .vscode/
 .idea/
@@ -44,3 +45,11 @@ Thumbs.db
 *.tmp
 core
 core.*
+
+# ── Environment variables ──
+.env
+.env.*
+
+# ── Local scripts ──
+start_all.sh
+stop_all.sh

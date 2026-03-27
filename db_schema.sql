@@ -7,18 +7,16 @@ CREATE TABLE IF NOT EXISTS sessions (
     total           INTEGER DEFAULT 0,
     ok_count        INTEGER DEFAULT 0,
     nok_no_barcode  INTEGER DEFAULT 0,
-    nok_no_date     INTEGER DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS stats_snapshots (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id      TEXT,
-    captured_at     TEXT,
-    total           INTEGER DEFAULT 0,
-    ok_count        INTEGER DEFAULT 0,
-    nok_no_barcode  INTEGER DEFAULT 0,
     nok_no_date     INTEGER DEFAULT 0,
-    nok_rate        REAL DEFAULT 0.0
+    nok_anomaly     INTEGER DEFAULT 0
 );
 
-CREATE INDEX IF NOT EXISTS idx_snapshots_session ON stats_snapshots (session_id);
+CREATE TABLE IF NOT EXISTS defective_packets (
+    id              SERIAL PRIMARY KEY,
+    session_id      TEXT REFERENCES sessions(id),
+    packet_num      INTEGER NOT NULL,
+    defect_type     TEXT NOT NULL,
+    crossed_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_defective_session ON defective_packets (session_id);
