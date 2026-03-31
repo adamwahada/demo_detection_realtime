@@ -1,5 +1,6 @@
 flask
 flask-cors
+gevent
 requests
 opencv-python==4.8.1.78
 numpy<2
@@ -8,3 +9,5 @@ pyyaml
 Pillow
 torch==2.0.1
 torchvision==0.15.2
+APScheduler>=3.10.0
+pytz

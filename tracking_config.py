@@ -36,6 +36,10 @@ CHECKPOINTS = [
         "barcode_class": "barcode",
         "date_class":    "date",
         "require_date_for_ok": True,
+        # Exit line defaults for this checkpoint (vertical line at 85%, near the left, inverted)
+        "exit_line_pct": 85,
+        "exit_line_vertical": True,
+        "exit_line_inverted": True,
         # Secondary model for maximum date-detection accuracy.
         # Runs in parallel on each frame; its date detections are used
         # for OK/NOK validation alongside barcodes from the primary model.
@@ -84,6 +88,16 @@ CAMERAS = [
 ]
 
 DEFAULT_CAMERA_ID = "cam0"
+
+# ==========================
+# PIPELINES  (each pipeline = one camera + one checkpoint running in parallel)
+# ==========================
+PIPELINES = [
+    {"id": "pipeline_0", "label": "Tracking Line",  "camera_source": "/home/adam/YOLO_Benchmark/ultralytics/V1_comp.mp4", "checkpoint_id": "barcode_date"},
+    {"id": "pipeline_1", "label": "Anomaly Line",   "camera_source": "/home/adam/YOLO_Benchmark/ultralytics/testAnomalie-Trim3.mp4", "checkpoint_id": "anomaly"},
+]
+
+DEFAULT_VIEW_PIPELINE = "pipeline_0"
 
 # ==========================
 # LEGACY alias (kept for imports that still use MODEL_PATH)
