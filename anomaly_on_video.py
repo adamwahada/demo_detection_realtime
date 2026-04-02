@@ -112,11 +112,11 @@ class AnomalyPipeline:
         img_crop = frame[cy1:cy2, cx1:cx2].copy()
         mask_crop = mask_full[cy1:cy2, cx1:cx2].copy()
         
-        if self.args.refine_mask:
-            mask_final = self.refine_mask(mask_crop)
-        else:
-            mask_final = mask_crop.astype(np.uint8)
-            
+        #if self.args.refine_mask:
+        #    mask_final = self.refine_mask(mask_crop)
+        #else:
+        #    mask_final = mask_crop.astype(np.uint8)
+        mask_final = mask_crop.astype(np.uint8)    
         img_crop[mask_final == 0] = 0
         
         img_rgb = cv2.cvtColor(img_crop, cv2.COLOR_BGR2RGB)

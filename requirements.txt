@@ -1,0 +1,17 @@
+flask
+flask-cors
+gevent
+requests
+opencv-python==4.8.1.78
+numpy<2
+ultralytics
+pyyaml
+Pillow
+torch
+torchvision
+torchaudio
+APScheduler>=3.10.0
+pytz
+tifffile
+tqdm
+psycopg2-binary

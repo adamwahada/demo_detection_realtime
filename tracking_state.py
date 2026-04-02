@@ -9,6 +9,7 @@ import os
 import time
 import threading
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -45,6 +46,10 @@ def _write_tracker_yaml():
 
 TRACKER_YAML_PATH = _write_tracker_yaml()
 
+# ── Bounded thread pools (Fix 4 & Fix 6) ──
+_secondary_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="SecModel")
+_proof_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ProofSave")
+
 
 class TrackingState:
     """
@@ -56,7 +61,8 @@ class TrackingState:
     overlay, so the stream is always smooth regardless of YOLO speed.
     """
 
-    def __init__(self):
+    def __init__(self, pipeline_id=None, db_writer=None):
+        self.pipeline_id = pipeline_id
         self.model = None
         self.package_id = None
         self.barcode_id = None
@@ -153,7 +159,12 @@ class TrackingState:
         self._perf = self._empty_perf()
 
         # ── DB writer (fully async, never blocks detector/compositor) ──
-        self._db_writer = DBWriter() if _DB_AVAILABLE else None
+        # When a db_writer is injected (multi-pipeline mode) use it;
+        # otherwise create our own (single-pipeline backward compat).
+        if db_writer is not None:
+            self._db_writer = db_writer
+        else:
+            self._db_writer = DBWriter() if _DB_AVAILABLE else None
         self._db_writer_started = False
         self._db_session_id = None
         self._stats_active = False
@@ -383,11 +394,17 @@ class TrackingState:
         # MAJORITY
         return sum(results) > (len(results) / 2)
 
-    def _save_nok_packet(self, pkt_num, tstate, checkpoint):
-        """Save NOK packet scan crops + CSV to anomalie/<pkt_num>/."""
+    def _save_nok_packet(self, pkt_num, tstate, checkpoint, session_id=None):
+        """Save NOK packet — worst-crop image + CSV under liveImages/<session>/anomalie/<pkt_num>/."""
         import csv
-        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "anomalie")
-        pkt_dir = os.path.join(base, str(pkt_num))
+        if session_id:
+            base = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "liveImages", session_id, "anomalie", str(pkt_num),
+            )
+        else:
+            base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "anomalie", str(pkt_num))
+        pkt_dir = base
         try:
             os.makedirs(pkt_dir, exist_ok=True)
         except OSError as e:
@@ -399,12 +416,13 @@ class TrackingState:
         results = tstate.get("results", [])
         crops = tstate.get("crops", [])
 
-        # Save each crop image
-        for idx, crop in enumerate(crops, start=1):
-            img_path = os.path.join(pkt_dir, f"scan_{idx}.png")
+        # Save worst crop image
+        if crops and scores:
+            worst_idx = max(range(len(scores)), key=lambda i: scores[i])
+            img_path = os.path.join(pkt_dir, "worst_scan.png")
             try:
-                bgr = cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)
-                cv2.imwrite(img_path, bgr)
+                bgr = cv2.cvtColor(crops[worst_idx], cv2.COLOR_RGB2BGR)
+                cv2.imwrite(img_path, bgr, [cv2.IMWRITE_PNG_COMPRESSION, 3])
             except Exception as e:
                 print(f"[AD] Failed to save {img_path}: {e}")
 
@@ -428,20 +446,19 @@ class TrackingState:
             print(f"[AD] Failed to write CSV {csv_path}: {e}")
 
     def _save_nok_packet_bg(self, pkt_num, tstate, checkpoint):
-        """Fire-and-forget: save NOK crops+CSV in a background thread."""
-        # Snapshot data so detector thread can continue immediately
+        """Fire-and-forget: save NOK image+CSV via bounded thread pool."""
+        # Snapshot data; capture session_id now so folder is stable even if session changes
         data = {
             'results': list(tstate.get('results', [])),
             'scores': list(tstate.get('scores', [])),
-            'crops': list(tstate.get('crops', [])),  # refs, cleared after
+            'crops': list(tstate.get('crops', [])),
         }
+        session_now = self._db_session_id if self._stats_active else None
         cp_copy = dict(checkpoint)
-        threading.Thread(
-            target=self._save_nok_packet,
-            args=(pkt_num, data, cp_copy),
-            daemon=True,
-            name=f"AD-Save-{pkt_num}",
-        ).start()
+        _proof_executor.submit(
+            self._save_nok_packet,
+            pkt_num, data, cp_copy, session_now,
+        )
 
     def _reset_session(self):
         self._is_paused = False
@@ -518,7 +535,7 @@ class TrackingState:
             print(f"[PROOF] Failed to save {img_path}: {e}")
 
     def _save_proof_image_bg(self, pkt_num, defect_type, frame, bbox=None):
-        """Fire-and-forget: save proof image in a background thread.
+        """Fire-and-forget: save proof image via bounded thread pool.
 
         Only saves when a stats recording session is active.
         Captures session_id at scheduling time so the image always lands
@@ -528,16 +545,14 @@ class TrackingState:
             return
         frame_copy = frame.copy()
         session_now = self._db_session_id
-        threading.Thread(
-            target=self._save_proof_image,
-            args=(pkt_num, defect_type, frame_copy, bbox, session_now),
-            daemon=True,
-            name=f"Proof-{pkt_num}",
-        ).start()
+        _proof_executor.submit(
+            self._save_proof_image,
+            pkt_num, defect_type, frame_copy, bbox, session_now,
+        )
 
     # ─────────────────────────────────────────
 
-    def set_stats_recording(self, active):
+    def set_stats_recording(self, active, group_id="", shift_id=""):
         active = bool(active)
         if active == self._stats_active:
             return {"stats_active": self._stats_active, "session_id": self._db_session_id}
@@ -550,7 +565,7 @@ class TrackingState:
                     self._db_writer_started = True
                 cp_id = (self.current_checkpoint or {}).get("id", "")
                 cam_src = str(self.video_source or "")
-                new_sid = self._db_writer.open_session(checkpoint_id=cp_id, camera_source=cam_src)
+                new_sid = self._db_writer.open_session(checkpoint_id=cp_id, camera_source=cam_src, group_id=group_id, shift_id=shift_id)
                 self._db_writer.set_active(True)
             self._db_session_id = new_sid
             self._stats_active = True
@@ -927,6 +942,16 @@ class TrackingState:
         self.mode = checkpoint.get("mode", "tracking")
         self.current_checkpoint = checkpoint
 
+        # Apply per-checkpoint exit line settings if present
+        if "exit_line_pct" in checkpoint:
+            self._exit_line_pct = checkpoint["exit_line_pct"]
+        if "exit_line_vertical" in checkpoint:
+            self._exit_line_vertical = checkpoint["exit_line_vertical"]
+        if "exit_line_inverted" in checkpoint:
+            self._exit_line_inverted = checkpoint["exit_line_inverted"]
+        if self._frame_height > 0 or self._frame_width > 0:
+            self._recompute_exit_line_y()
+
         print(f"[SWITCH] Loaded | mode={self.mode} | "
               f"package_id={self.package_id} barcode_id={self.barcode_id} date_id={self.date_id}")
 
@@ -1051,11 +1076,18 @@ class TrackingState:
                 ret, frame = self.cap.read()
                 if not ret:
                     if self._is_video_file:
-                        print("[READER] Video file ended")
-                        self._video_ended = True
-                        with self._stats_lock:
-                            self.stats["video_ended"] = True
-                    break
+                        # Loop the video for simulation purposes
+                        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        ret, frame = self.cap.read()
+                        if not ret:
+                            print("[READER] Video file ended (could not loop)")
+                            self._video_ended = True
+                            with self._stats_lock:
+                                self.stats["video_ended"] = True
+                            break
+                        print("[READER] Video looped back to start")
+                    else:
+                        break
 
                 self.frame_count += 1
                 frame_idx = self.frame_count
@@ -1137,8 +1169,16 @@ class TrackingState:
                 return
 
             height, width = first_frame.shape[:2]
-            # Compute exit line position from config ratio (only if not already set via API)
-            self._exit_line_pct = round((1.0 - CONFIG["exit_line_ratio"]) * 100)
+            # Per-checkpoint exit line settings override the global CONFIG default
+            cp = self.current_checkpoint or {}
+            if "exit_line_pct" in cp:
+                self._exit_line_pct = cp["exit_line_pct"]
+            else:
+                self._exit_line_pct = round((1.0 - CONFIG["exit_line_ratio"]) * 100)
+            if "exit_line_vertical" in cp:
+                self._exit_line_vertical = cp["exit_line_vertical"]
+            if "exit_line_inverted" in cp:
+                self._exit_line_inverted = cp["exit_line_inverted"]
             self._recompute_exit_line_y()
             EXIT_LINE_Y = self._exit_line_y
 
@@ -1412,15 +1452,13 @@ class TrackingState:
                                 if self._stats_active and is_def:
                                     self._nok_anomaly += 1
 
-                                print(f"[AD] Packet #{self.total_packets} -> {final} "
-                                      f"(scans={len(tstate['results'])})")
+                                if is_def:
+                                    print(f"[AD] Packet #{self.total_packets} -> NOK "
+                                          f"(scans={len(tstate['results'])})")
 
                                 if is_def:
                                     self._save_nok_packet_bg(
                                         self.total_packets, tstate, cp)
-                                    self._save_proof_image_bg(
-                                        self.total_packets - self._session_baseline_total,
-                                        "anomaly", frame, (x1, y1, x2, y2))
 
                                 tstate['crops'] = []
                                 tstate['scores'] = []
@@ -1510,6 +1548,18 @@ class TrackingState:
                 barcode_dets = []
                 date_dets = []
 
+                # ── Submit secondary date model in parallel (Fix 4) ──
+                sec_future = None
+                if self._use_secondary_date and self.secondary_model is not None:
+                    sec_conf = self.current_checkpoint.get("conf_date", CONFIG.get("conf_date", 0.30))
+                    sec_future = _secondary_executor.submit(
+                        self.secondary_model,
+                        frame,
+                        conf=sec_conf,
+                        imgsz=CONFIG["imgsz"],
+                        verbose=False,
+                    )
+
                 if results.boxes is not None:
                     box_ids = results.boxes.id
                     for i, b in enumerate(results.boxes):
@@ -1525,17 +1575,11 @@ class TrackingState:
                         elif self.date_id is not None and cls == self.date_id and conf >= self.current_checkpoint.get("conf_date", CONFIG.get("conf_date", 0.30)):
                             date_dets.append([int(x1), int(y1), int(x2), int(y2), conf])
 
-                # ── Secondary date model inference (if active) ──
+                # ── Secondary date model inference (collect parallel result) ──
                 secondary_date_dets = []
-                if self._use_secondary_date and self.secondary_model is not None:
+                if sec_future is not None:
                     try:
-                        sec_conf = self.current_checkpoint.get("conf_date", CONFIG.get("conf_date", 0.30))
-                        sec_results = self.secondary_model(
-                            frame,
-                            conf=sec_conf,
-                            imgsz=CONFIG["imgsz"],
-                            verbose=False
-                        )[0]
+                        sec_results = sec_future.result(timeout=2.0)[0]
                         if sec_results.boxes is not None:
                             for b in sec_results.boxes:
                                 cls = int(b.cls)

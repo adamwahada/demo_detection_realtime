@@ -36,6 +36,10 @@ CHECKPOINTS = [
         "barcode_class": "barcode",
         "date_class":    "date",
         "require_date_for_ok": True,
+        # Exit line defaults for this checkpoint (vertical line at 85%, near the left, inverted)
+        "exit_line_pct": 85,
+        "exit_line_vertical": True,
+        "exit_line_inverted": True,
         # Secondary model for maximum date-detection accuracy.
         # Runs in parallel on each frame; its date detections are used
         # for OK/NOK validation alongside barcodes from the primary model.
@@ -81,9 +85,24 @@ DEFAULT_CHECKPOINT_ID = "tracking"
 CAMERAS = [
     {"id": "cam0", "label": "Camera 0",  "source": 0},
     {"id": "cam1", "label": "Camera 1",  "source": 1},
+    {"id": "cam2", "label": "Camera 2",  "source": 2},
 ]
 
 DEFAULT_CAMERA_ID = "cam0"
+
+# ==========================
+# PIPELINES  (each pipeline = one camera + one checkpoint running in parallel)
+# ==========================
+PIPELINES = [
+    {"id": "pipeline_0", "label": "Tracking Line",  "camera_source": "/home/adam/Desktop/demo_detection_realtime/V1_comp.mp4", "checkpoint_id": "barcode_date"},
+    {"id": "pipeline_1", "label": "Anomaly Line",   "camera_source": "/home/adam/Desktop/demo_detection_realtime/testAnomalie-Trim3.mp4", "checkpoint_id": "anomaly"},
+    # Live camera test pipeline: uses webcam/capture card index 0 with tracking model.
+    {"id": "pipeline_cam_test",    "label": "Camera Test (Tracking)",        "camera_source": 0, "checkpoint_id": "tracking"},
+    # Live barcode+date detection pipeline on camera 2.
+    {"id": "pipeline_cam_barcode", "label": "Camera 2 — Barcode + Date",       "camera_source": 2, "checkpoint_id": "barcode_date"},
+]
+
+DEFAULT_VIEW_PIPELINE = "pipeline_cam_test"
 
 # ==========================
 # LEGACY alias (kept for imports that still use MODEL_PATH)
